@@ -104,3 +104,36 @@ class VisionAssessment(VisionModel):
             if item.model_source != self.model_source:
                 raise ValueError('候选和分析的模型来源不一致。')
         return self
+
+
+ReviewText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=600)]
+
+
+class RepairRegionReview(VisionModel):
+    """One model review of an existing local repair region (advisory only)."""
+
+    region_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+    observation: ReviewText
+    repair_suggestion: ReviewText
+    repair_assessment: ReviewText
+    basis: ReviewText
+    risk_level: RiskLevel
+    uncertainty: ReviewText
+    human_review_required: bool
+    review_reason: ReviewText
+
+
+class RepairAssessment(VisionModel):
+    """Provider-independent repair review; never an instruction to edit pixels."""
+
+    source: Literal['deepseek']
+    model_source: ShortText
+    regions: Annotated[list[RepairRegionReview], Field(max_length=MAX_CANDIDATES)]
+    limitations: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] = ''
+    advisory: Literal[True] = True
+
+    @model_validator(mode='after')
+    def validate_regions(self) -> 'RepairAssessment':
+        if len({item.region_id for item in self.regions}) != len(self.regions):
+            raise ValueError('评估区域 ID 重复。')
+        return self

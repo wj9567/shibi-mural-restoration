@@ -167,6 +167,22 @@ textarea { resize: vertical; min-height: 66px; line-height: 1.5; }
 .region-images figure { margin: 0; display: flex; flex-direction: column; gap: 3px; }
 .region-images img { max-height: 120px; max-width: 280px; border: 1px solid #e4e7eb; border-radius: 4px; background: #f7f8fa; object-fit: contain; }
 .region-images figcaption { font-size: 10px; color: var(--muted); }
+.ai-review-toolbar { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
+.ai-review-toolbar input { flex: 1 1 auto; min-width: 160px; font-size: 11px; padding: 4px 8px; }
+.ai-review-panel { flex: 0 1 auto; overflow-y: auto; max-height: 320px; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: #fbfcfd; }
+.ai-review-panel.hidden { display: none; }
+.ai-review-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.ai-review-head small { color: var(--muted); font-size: 10px; }
+.ai-region { border: 1px solid #e4e7eb; border-radius: 6px; padding: 7px 9px; margin-bottom: 8px; background: #fff; }
+.ai-region.needs-review { border-color: #d9a441; background: #fffdf6; }
+.ai-region header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; margin-bottom: 4px; }
+.ai-region p { margin: 2px 0; font-size: 11px; line-height: 1.55; }
+.ai-region p b { color: #4d5764; }
+.ai-risk { font-size: 10px; color: #8a5a00; background: #fff3d6; border-radius: 3px; padding: 1px 5px; }
+.ai-flag { font-size: 10px; color: #8a2b0f; background: #fde7df; border-radius: 3px; padding: 1px 5px; }
+.ai-flag.ok { color: #2f6b3a; background: #e8f4ea; }
+.ai-reason { color: #7a3b12; }
+.ai-review-error { color: #9f2f1c; font-size: 12px; margin: 4px 0; }
 .comparison-toolbar { display: flex; align-items: center; gap: 8px; color: #858d96; font-size: 9px; }
 .comparison-toolbar select { width: 106px; padding: 5px 6px; }
 .comparison-toolbar input[type="range"] { flex: 1; min-width: 50px; }

@@ -315,7 +315,8 @@ class Bridge(QObject):
                         image = self.store.get('image', item['image_id'])
                         item['file_url'] = self._file_url(self.store.folder(image['id']) / 'image.png')
             except Exception as exc:
-                self.aux = {'status': 'error', 'error': str(exc)[:500]}
+                # Keep the label so the UI can tell which auxiliary action failed.
+                self.aux = {'status': 'error', 'error': str(exc)[:500], 'label': self.aux.get('label')}
             if image_id is not None:
                 self.aux['image_id'] = image_id
             self.aux_version += 1
@@ -942,6 +943,63 @@ class Bridge(QObject):
             self.current_image_id = image['id']
             result['jobs'] = [self._job(job) for job in result['jobs']]
             return result
+        return self._result(action)
+
+    @Slot(str, result=str)
+    def assessRepair(self, request_json):
+        """Stage 5: advisory DeepSeek review of existing local repair results."""
+        def action():
+            request = json.loads(request_json)
+            image = self.store.get('image', request.get('image_id'))
+            if not image:
+                raise ValueError('图像记录不存在。')
+            if not self.settings.deepseek_api_key:
+                raise ValueError('请先在 API 设置保存 DeepSeek 密钥，再使用 AI 修复评估。')
+            job = self.store.get('job', request['job_id']) if request.get('job_id') else None
+            if request.get('job_id') and not job:
+                raise ValueError('修复任务不存在。')
+            if job and job['image_id'] != image['id']:
+                raise ValueError('修复任务不属于当前图像。')
+            from . import repair_assessment
+            cases = repair_assessment.collect_cases(self.store, image, (job or {}).get('id'))
+            if not cases:
+                raise ValueError('请先确认缺损区域并生成掩膜，再请求 AI 修复评估。')
+            if not any(case['candidate'] for case in cases):
+                raise ValueError('还没有本地修复候选可供评估，请先生成修复候选。')
+            context = str(request.get('context') or '')[:800]
+
+            def run_assessment():
+                from PIL import Image
+                from .deepseek_vision import DeepSeekVisionProvider
+                from . import repair_assessment as analysis
+                original, composite = analysis.compose_repaired(self.store, image, cases)
+                regions, crops = [], []
+                for case in cases:
+                    regions.append({
+                        'region_id': case['region_id'], 'type': case['type'],
+                        'type_label': analysis.type_label(case['type']),
+                        'bbox_0_1000': case['bbox_0_1000'], 'method': case['method'],
+                        'mask_fraction': round(case['mask_fraction'], 4),
+                        'has_candidate': bool(case['candidate']),
+                        'local_evidence': (case['evidence'] or '')[:200],
+                    })
+                    if case['candidate'] and len(crops) < analysis.MAX_CROPS:
+                        pair = analysis.crop_pair(self.store, image, case['job'], case['candidate'], case['mask'])
+                        if pair:
+                            crops.append({'region_id': case['region_id'], 'before': pair[0], 'after': pair[1]})
+                provider = DeepSeekVisionProvider(self.settings.deepseek_api_key, timeout=90)
+                assessment = provider.assess_repair(
+                    Image.fromarray(original), Image.fromarray(composite), regions,
+                    context=context, crops=crops)
+                rows = analysis.merge(assessment, cases, original, context)
+                record = analysis.assessment_record(
+                    self.store, image, job or (cases[0]['job'] if cases[0]['job'] else None),
+                    cases, assessment, rows, context)
+                return {'assessment': record}
+
+            started = self._aux(run_assessment, 'DeepSeek 正在评估修复结果…', image_id=image['id'])
+            self.current_image_id = image['id']
+            return started
         return self._result(action)
 
     @Slot(str, result=str)
