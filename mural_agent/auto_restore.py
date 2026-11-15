@@ -159,8 +159,8 @@ def summary_for(items, routes, fraction, backend):
         kinds[label] = kinds.get(label, 0) + 1
     detail = '、'.join(f'{label}×{count}' for label, count in kinds.items())
     tools = ' / '.join(dict.fromkeys(route['tool'] for route in routes))
-    return (f'AI 自主：识别 {len(items)} 处疑似缺损（{detail}），自动掩膜占 {fraction:.2%}，'
-            f'建议 {tools}（主引擎 {backend}）。识别、掩膜与工具均为候选，须人工复核。')
+    return (f'AI 自主：识别 {len(items)} 处疑似缺损（{detail}），自动修复范围占 {fraction:.2%}，'
+            f'建议 {tools}（主引擎 {backend}）。识别、修复范围与工具均为候选，须人工复核。')
 
 
 def context_instructions(context):
@@ -267,7 +267,7 @@ def _collect_proposals(store, engine, image_record, min_confidence=MIN_CONFIDENC
         if key not in {(candidate.get('type'), tuple(candidate.get('bbox') or [])) for candidate in selected}:
             omitted[key] = '置信度或区域尺寸未达到自动细化门槛'
         else:
-            omitted[key] = '独立掩膜未通过面积限制，需手工确认选区'
+            omitted[key] = '独立修复范围未通过面积限制，需手工确认选区'
     for item in assessment.get('items', []):
         key = (item.get('type'), tuple(item.get('bbox') or []))
         if key not in omitted:
@@ -283,7 +283,7 @@ def _collect_proposals(store, engine, image_record, min_confidence=MIN_CONFIDENC
 
     fraction = float((union > 0).mean())
     if fraction < MIN_MASK_FRACTION:
-        raise ValueError('AI 候选掩膜过小（低于图像 0.05%），未自动提交；请改用手动画选。')
+        raise ValueError('AI 候选修复范围过小（低于图像 0.05%），未自动提交；请改用手动画选。')
     summary = summary_for(accepted_items, accepted_routes, fraction, backend)
     cultural_context = assessment.get('cultural_context') or {}
     return {

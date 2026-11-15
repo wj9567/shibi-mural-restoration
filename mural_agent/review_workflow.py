@@ -14,7 +14,7 @@ from .storage import new_id, timestamp
 IDENTIFICATION_STATES = {'pending', 'confirmed', 'expert_review'}
 CANDIDATE_STATES = {'accepted', 'accepted_hypothesis', 'rejected', 'expert_review', 'experimental_preview'}
 STALE_REASONS = {
-    'mask': '掩膜或区域已人工修改',
+    'mask': '修复范围或区域已人工修改',
     'recommendation': '修复建议已人工修改',
     'removed': '病害区域已删除',
 }
@@ -97,7 +97,7 @@ def candidate_stale(store, job, candidate):
     proposal = store.get('proposal', job.get('defect_proposal_id')) if job.get('defect_proposal_id') else None
     snapshot = candidate.get('proposal_revision')
     if proposal and snapshot is not None and int(snapshot) != revision(proposal):
-        return True, '区域已更新，候选基于旧掩膜或旧修复建议'
+        return True, '区域已更新，候选基于旧修复范围或旧修复建议'
     return False, ''
 
 

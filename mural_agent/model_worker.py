@@ -68,7 +68,7 @@ def execute(request):
         mask = mask.filter(ImageFilter.MaxFilter(2 * radius + 1))
     mask = mask.resize(size, Image.Resampling.NEAREST)
     if not mask.getbbox():
-        raise RuntimeError('掩膜在 512px 推放下丢失，请扩大圈选范围。')
+        raise RuntimeError('修复范围在 512px 推放下丢失，请扩大圈选范围。')
     padded_size = (((size[0]+7)//8)*8, ((size[1]+7)//8)*8)
     canvas = Image.new('RGB', padded_size)
     canvas.paste(image, (0, 0))

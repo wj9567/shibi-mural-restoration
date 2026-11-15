@@ -315,7 +315,7 @@ def _advice(regions, assessment):
     tips = []
     kinds = {region['type'] for region in regions}
     if kinds & {'crack', 'paint_loss', 'plaster_loss', 'flaking'}:
-        tips.append('裂隙与剥落区域可做局部保守数字补全，仅作展示，必须在掩膜内并保留原画线条。')
+        tips.append('裂隙与剥落区域可做局部保守数字补全，仅作展示，必须在修复范围内并保留原画线条。')
     if kinds & {'fading', 'stain'}:
         tips.append('褪色/污染优先做色调整理与记录，不建议直接补洞。')
     if any(region['assessment'] and region['assessment'].get('human_review_required') for region in regions):
@@ -338,11 +338,11 @@ def _uncertainties(regions, assessment):
         notes.append('尚未确认识别：' + '、'.join(dict.fromkeys(pending)) + '。')
     review = [region['label'] for region in regions if region['mask_status'] in {'needs_review', 'observation'}]
     if review:
-        notes.append('掩膜需人工修正或属于观察类：' + '、'.join(dict.fromkeys(review)) + '。')
+        notes.append('修复范围需人工修正或属于观察类：' + '、'.join(dict.fromkeys(review)) + '。')
     if assessment is None:
         notes.append('本次未调用 DeepSeek 修复评估；风险与复核意见仅来自本地规则。')
     elif assessment.get('stale'):
-        notes.append('AI 评估基于旧掩膜，已标记过期，需重新生成候选后再次评估。')
+        notes.append('AI 评估基于旧修复范围，已标记过期，需重新生成候选后再次评估。')
     else:
         flagged = [row for row in assessment.get('regions') or [] if row.get('human_review_required')]
         if flagged:
@@ -383,8 +383,8 @@ def build_observation_card(store, image, output_path):
         for index, region in enumerate(regions, 1):
             state = {'confirmed': '识别已确认', 'expert_review': '识别已确认 · 需专家复核',
                      'pending': '识别待确认'}.get(region['identification'], region['identification'])
-            mask = {'sam': 'SAM 掩膜候选', 'manual': '人工掩膜', 'needs_review': '掩膜待修正',
-                    'observation': '观察类，不生成掩膜'}.get(region['mask_status'], region['mask_status'] or '无掩膜')
+            mask = {'sam': 'SAM 修复范围候选', 'manual': '人工修复范围', 'needs_review': '修复范围待修正',
+                    'observation': '观察类，不生成修复范围'}.get(region['mask_status'], region['mask_status'] or '无修复范围')
             header = f'{index}. {region["label"]} · {state} · {mask}'
             if region['candidate']:
                 header += f' · 候选：{TOOL_LABELS.get(region["candidate"].get("tool"), region["candidate"].get("tool"))}'
@@ -462,14 +462,14 @@ def build_repair_report(store, image, job, output_path):
         fraction = (candidate.get('metrics') or {}).get('masked_fraction')
         if not isinstance(fraction, (int, float)) or not 0 < fraction <= 1:
             fraction = (proposal or {}).get('fraction') or 0
-        page.paragraph(f'掩膜占比：{float(fraction):.2%} · '
+        page.paragraph(f'修复范围占比：{float(fraction):.2%} · '
                        f'区域等级：{(proposal or {}).get("region_class") or "未记录"}', max_lines=1)
 
     if page.section('二、输出检查'):
         checks = candidate.get('checks') or {}
         page.paragraph(f'输出尺寸一致：{"是" if checks.get("size_match") else "否"} · '
-                       f'掩膜外像素不变：{"是" if checks.get("outside_unchanged") else "否"}', max_lines=1)
-        page.paragraph('工程检查只证明没有改动掩膜外像素，不证明补全内容符合历史原貌。', max_lines=2,
+                       f'修复范围之外的像素不变：{"是" if checks.get("outside_unchanged") else "否"}', max_lines=1)
+        page.paragraph('工程检查只证明没有改动修复范围之外的像素，不证明补全内容符合历史原貌。', max_lines=2,
                        color=(.48, .25, .1))
 
     if page.section('三、修复摘要'):

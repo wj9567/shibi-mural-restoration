@@ -112,7 +112,7 @@ def test_repair_report_is_two_pages_and_records_review(tmp_path):
     reader, text = pdf_text(output)
     assert len(reader.pages) == 2
     for token in ('修复成果说明', '修复前原图', '本地修复结果', '差异图', '修复方式',
-                  'LaMa 纹理补全', '输出检查', '掩膜外像素不变', '人工审核记录',
+                  'LaMa 纹理补全', '输出检查', '修复范围之外的像素不变', '人工审核记录',
                   'candidate_accept', 'deepseek-flash', 'CC0'):
         assert token in text, token
 

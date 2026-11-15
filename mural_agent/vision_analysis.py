@@ -37,7 +37,7 @@ SAM_EXTENT_PADDING = .15
 SAM_COARSE_FRACTION = .5
 MAX_CANDIDATES = 8
 OBSERVATION_NOTICE = '该类型为表面观察（褪色/污染），不默认补洞；请人工决定是否做局部色调匹配。'
-COARSE_NOTICE = '候选框覆盖超过一半画面，SAM 无法给出局部掩膜；请手动框选实际缺损范围。'
+COARSE_NOTICE = '候选框覆盖超过一半画面，SAM 无法给出局部修复范围；请手动框选实际缺损范围。'
 DUPLICATE_NOTICE = '模型对多个候选给出相同定位框，定位不可信；请手动框选实际缺损范围。'
 
 
@@ -108,16 +108,16 @@ def _sam_mask(engine, work_image, box):
     """Return ``(mask, status, notice)``; only a verified mask is ``sam``."""
     sam = getattr(engine, 'sam', None)
     if sam is None or not sam.available():
-        return None, 'needs_review', 'SAM 2.1 权重未安装，仅保留候选框；请手动修正掩膜。'
+        return None, 'needs_review', 'SAM 2.1 权重未安装，仅保留候选框；请手动修正修复范围。'
     try:
         mask, metadata = sam.predict(work_image, box=list(box))
     except Exception as exc:  # noqa: BLE001 — a failed split is a normal fallback
         return None, 'needs_review', f'SAM 分割未完成（{str(exc)[:120]}），仅保留候选框；请手动修正。'
     if mask is None:
-        return None, 'needs_review', 'SAM 没有返回掩膜，仅保留候选框；请手动修正。'
+        return None, 'needs_review', 'SAM 没有返回修复范围，仅保留候选框；请手动修正。'
     array = np.asarray(mask)
     if array.shape != work_image.shape[:2]:
-        return None, 'needs_review', 'SAM 返回的掩膜尺寸与原图不一致，已丢弃；请手动修正。'
+        return None, 'needs_review', 'SAM 返回的修复范围尺寸与原图不一致，已丢弃；请手动修正。'
     binary = array > 127
     if not binary.any():
         return None, 'needs_review', 'SAM 未分割出有效像素，仅保留候选框；请手动修正。'
@@ -125,9 +125,9 @@ def _sam_mask(engine, work_image, box):
     if score < SAM_MIN_IOU:
         return None, 'needs_review', f'SAM 置信分偏低（{score:.2f}），仅保留候选框；请手动修正。'
     if _mask_leaks(binary, box, work_image.shape[:2]):
-        return None, 'needs_review', 'SAM 掩膜明显超出候选框，已丢弃；请手动修正。'
+        return None, 'needs_review', 'SAM 修复范围明显超出候选框，已丢弃；请手动修正。'
     if _mask_extent_leaks(binary, box, work_image.shape[:2]):
-        return None, 'needs_review', 'SAM 掩膜范围远超候选框（可能选中了整条边线），已丢弃；请手动修正。'
+        return None, 'needs_review', 'SAM 修复范围范围远超候选框（可能选中了整条边线），已丢弃；请手动修正。'
     return binary.astype(np.uint8) * 255, 'sam', ''
 
 
@@ -178,7 +178,7 @@ def detect_local(store, engine, image_record):
             observation=evidence,
             evidence=evidence,
             repair_suggestion=recommendation['method'],
-            uncertainty='本地视觉候选，需人工复核；掩膜只是分割候选。',
+            uncertainty='本地视觉候选，需人工复核；修复范围只是分割候选。',
             risk_level='unknown',
             model_source=MODEL_SOURCE,
         )
@@ -200,7 +200,7 @@ def detect_local(store, engine, image_record):
                         'mask_notice': notice, 'size': str(raw.get('size') or 'uncertain')[:20],
                         'confidence': raw.get('confidence'),
                         'recommendation': recommendation})
-    limitations = (result.get('limitations') or '').strip() or '本地视觉候选需人工核对；掩膜不是修复定稿。'
+    limitations = (result.get('limitations') or '').strip() or '本地视觉候选需人工核对；修复范围不是修复定稿。'
     return VisionAssessment(source='local', model_source=MODEL_SOURCE, image=image, items=items,
                             limitations=limitations, cultural_context=_cultural_context(result)), entries
 

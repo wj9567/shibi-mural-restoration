@@ -147,7 +147,7 @@ def create_app(settings=None):
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         if mask.size != (image['width'], image['height']):
-            raise HTTPException(400, '掩膜必须与工作图尺寸一致。')
+            raise HTTPException(400, '修复范围必须与工作图尺寸一致。')
         array = np.asarray(mask) > 127
         if not array.any():
             raise HTTPException(400, '请先圈选需要修复的区域。')
@@ -166,7 +166,7 @@ def create_app(settings=None):
         require('image', request.image_id)
         mask = require('mask', request.mask_id)
         if mask['image_id'] != request.image_id:
-            raise HTTPException(400, '掩膜不属于当前图像。')
+            raise HTTPException(400, '修复范围不属于当前图像。')
         if request.backend == 'lama' and not engine.lama.available():
             raise HTTPException(409, 'LaMa 尚未就绪，请先安装权重或选择传统修补。')
         if request.planner == 'api' and not settings.api_ready:

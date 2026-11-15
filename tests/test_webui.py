@@ -888,7 +888,7 @@ def test_ai_repair_review_panel_renders_advisory_fields(window, qt_app):
     assert run_js(window, f"window.__shibui.renderAiReview({json.dumps(record)}); true") is True
     panel = run_js(window, "document.querySelector('#ai-review-panel').textContent")
     for token in ('颜料层缺失', '本地检测', 'LaMa 纹理补全', 'DeepSeek 观察', '修复评价',
-                  '判断依据', '需要人工复核', '与人物面部重叠', '不会修改掩膜、像素或审核状态'):
+                  '判断依据', '需要人工复核', '与人物面部重叠', '不会修改修复范围、像素或审核状态'):
         assert token in panel, token
     assert run_js(window, "document.querySelectorAll('#ai-review-panel [data-ai-region]').length") == 1
     assert run_js(window, "document.querySelector('#ai-review-panel .ai-region').classList.contains('needs-review')") is True
@@ -950,3 +950,40 @@ def test_competition_pdf_buttons_and_demo_guide(window, qt_app):
     for token in ('导入有明确许可的壁画图像', '本地 Qwen3-VL 识别疑似病害', 'DeepSeek 修复评估', '导出观察卡'):
         assert token in text, token
     assert '不会用预置结果冒充实时推理' in run_js(window, "document.querySelector('#demo-modal').textContent")
+
+
+def test_rect_tool_default_red_selection_and_one_click_confirm(window, qt_app):
+    """Rectangle selection is the default tool and a pending region can be confirmed in one click."""
+    image = load_plain_fixture(window, qt_app)
+    assert run_js(window, "window.__shibui.state.tool") == 'rect'
+    assert run_js(window, "document.querySelector('[data-tool=\"rect\"]').classList.contains('active')") is True
+    assert run_js(window, "document.querySelector('[data-tool=\"brush\"]').classList.contains('active')") is False
+    drag = """(() => { const c = document.querySelector('#mask-canvas'), r = c.getBoundingClientRect();
+      const fire = (type, x, y, buttons) => c.dispatchEvent(new PointerEvent(type, {
+        bubbles: true, pointerId: 9, pointerType: 'mouse', button: 0, buttons,
+        clientX: r.left + r.width * x, clientY: r.top + r.height * y }));
+      fire('pointerdown', .3, .3, 1); fire('pointermove', .6, .6, 1); fire('pointerup', .6, .6, 0);
+      return true; })()"""
+    assert run_js(window, drag) is True
+    assert wait_until(qt_app, lambda: run_js(window, 'window.__shibui.state.damageItems.length') == 1, 10)
+    assert run_js(window, "document.querySelector('#damage-highlight').classList.contains('visible')") is True
+    dragged = json.loads(run_js(window, "JSON.stringify(window.__shibui.state.damageItems[0])"))
+    assert dragged['mask_file_url'] and dragged['confirmed'] is True
+
+    # A detected region without a range gets one from the one-click action.
+    pending_id = new_id()
+    window.store.put('proposal', {
+        'id': pending_id, 'image_id': image['id'], 'created_at': '2026-11-16T00:00:09+00:00',
+        'confirmed': False, 'local_detection': True,
+        'metadata': {'type': 'fading', 'bbox_pixels': [100, 80, 180, 160],
+                     'local_detection': True, 'model_source': 'Qwen3-VL local'},
+    })
+    exposed = json.loads(window.bridge.listLocalDefects(image['id']))['defects']
+    pending = next(defect for defect in exposed if defect['proposal_id'] == pending_id)
+    assert run_js(window, f"window.__shibui.state.damageItems = {json.dumps([pending])};"
+                          " window.__shibui.renderDamage(); true") is True
+    assert run_js(window, "document.querySelectorAll('[data-auto-confirm]').length") == 1
+    assert run_js(window, "document.querySelector('[data-auto-confirm=\"0\"]').click(); true") is True
+    assert wait_until(qt_app, lambda: run_js(window, "Boolean(window.__shibui.state.damageItems[0]?.mask_file_url)") is True, 15)
+    assert wait_until(qt_app, lambda: run_js(window, 'window.__shibui.state.damageItems[0].identification_status') == 'confirmed', 10)
+    assert (window.store.folder(pending_id) / 'mask.png').is_file()

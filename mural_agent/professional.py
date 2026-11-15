@@ -96,7 +96,7 @@ def normalize_evidence_level(value):
 def normalize_mask_source(value, default='manual'):
     source = (value or default or 'manual').strip().lower()
     if source not in MASK_SOURCES:
-        raise ValueError('掩膜来源须为 ai_candidate / manual / sam / crack。')
+        raise ValueError('修复范围来源须为 ai_candidate / manual / sam / crack。')
     return source
 
 
@@ -152,16 +152,16 @@ def validate_professional_create(mask_record, *, rationale, evidence_level, mode
     parameters are accepted for backwards compatibility only and are ignored.
     """
     if not mask_record.get('user_confirmed'):
-        raise ValueError('专业分步：掩膜尚未经人工确认，不能创建或执行修复任务。')
+        raise ValueError('专业分步：修复范围尚未经人工确认，不能创建或执行修复任务。')
     if not mask_gate_confirmed:
-        raise ValueError('专业分步：请勾选「已核对掩膜与依据」后再进入下一档。')
+        raise ValueError('专业分步：请勾选「已核对修复范围与依据」后再进入下一档。')
     rationale = require_rationale(rationale)
     level = normalize_evidence_level(evidence_level)
     if level == 'observation':
         raise ValueError('专业分步：observation 仅可记录观察，禁止执行像素修复。')
     source = normalize_mask_source(mask_source or mask_record.get('mask_source') or 'manual')
     if source == 'ai_candidate' and not mask_record.get('user_confirmed'):
-        raise ValueError('专业分步：AI 候选掩膜须先由专家确认后再建任务。')
+        raise ValueError('专业分步：AI 候选修复范围须先由专家确认后再建任务。')
     flags = derive_risk_flags(mask_record)
     if mask_record.get('expert_force_override') and not force_override:
         force_override = True
@@ -232,7 +232,7 @@ def enforce_mode_and_risk(*, mode, mask_record, mask_gate_confirmed=False, allow
         if mode != 'speculative':
             raise ValueError('AI 尝试性补全必须在 speculative 模式下执行。')
         if not mask_gate_confirmed:
-            raise ValueError('专业分步：请勾选「已核对掩膜与依据」后再进入下一档。')
+            raise ValueError('专业分步：请勾选「已核对修复范围与依据」后再进入下一档。')
         if not risk_acknowledged:
             raise ValueError('AI 尝试性补全须勾选风险提示：结果是推测，不是历史原貌。')
         return flags
@@ -246,14 +246,14 @@ def enforce_mode_and_risk(*, mode, mask_record, mask_gate_confirmed=False, allow
         require_rationale(force_override_reason, label='强制放行理由')
     if mode == 'enhanced':
         if not mask_gate_confirmed:
-            raise ValueError('专业分步：请勾选「已核对掩膜与依据」后再进入下一档。')
+            raise ValueError('专业分步：请勾选「已核对修复范围与依据」后再进入下一档。')
         if not allow_enhanced:
             raise ValueError('专业分步：加强修复须勾选「允许加强」，且应在保守结果基础上再执行。')
         if not risk_acknowledged:
             raise ValueError('专业分步：加强修复须勾选风险提示（文化边界 / 非历史定稿）已知悉。')
     if mode == 'speculative':
         if not mask_gate_confirmed:
-            raise ValueError('专业分步：请勾选「已核对掩膜与依据」后再进入下一档。')
+            raise ValueError('专业分步：请勾选「已核对修复范围与依据」后再进入下一档。')
         if not risk_acknowledged:
             raise ValueError('专业分步：推测性补全须勾选风险提示已知悉。')
     return flags

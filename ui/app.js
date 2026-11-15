@@ -3,10 +3,11 @@
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const ACTIVE = ['queued', 'planning', 'running', 'evaluating'];
   const state = { bridge: null, image: null, job: null, candidate: null, keepEmpty: false, maskStrokes: [], regionStrokes: [], strokeOrder: [], currentStroke: null,
-    baseMask: null, maskDirty: false, tool: 'brush', brushSize: 28, zoom: 1, promptPoints: [], promptLabels: [], promptBox: null,
+    baseMask: null, maskDirty: false, tool: 'rect', brushSize: 28, zoom: 1, promptPoints: [], promptLabels: [], promptBox: null,
     proposal: null, references: [], selectedReference: null, registration: null, lastSnapshot: null, toastTimer: null,
     auxVersion: -1, damageItems: [], damageSummary: '', selectedDamage: null, activeJobId: null, running: false, autoBusy: false,
     damageDrawMode: false, damageDraw: null, damageDrawTarget: null, damageJobKey: null, maskEditTarget: null,
+    rectDraw: null,
     aiAssessment: null,
     batchJobIds: [], defectSubmitting: false, triple: { largeJobId: null, fullJobId: null } };
   const canvas = $('#mask-canvas');
@@ -84,7 +85,7 @@
         note.textContent = `${setup.qwen_hint || '本地分析需要已安装 Qwen3-VL。'} 仍可手动圈选缺损区域。`;
       } else {
         note.textContent = '使用本机 Qwen3-VL 识别病害；'
-          + (setup.sam_ready === false ? 'SAM 2.1 未安装，仅保留候选框，掩膜需手动修正。' : 'SAM 2.1 生成掩膜候选，需人工确认。');
+          + (setup.sam_ready === false ? 'SAM 2.1 未安装，仅保留候选框，修复范围需手动修正。' : 'SAM 2.1 生成修复范围候选，需人工确认。');
       }
     } else {
       note.textContent = '点击分析会向 DeepSeek 发送当前图像的缩小副本。'
@@ -151,11 +152,13 @@
     canvas.classList.toggle('sam-point', tool === 'sam-point');
     canvas.classList.toggle('sam-box', tool === 'sam-box');
     canvas.classList.toggle('eraser', tool === 'eraser');
-    $('#mask-status').textContent = tool === 'sam-point' ? '左键添加前景点，右键添加背景点' :
+    canvas.classList.toggle('rect-select', tool === 'rect');
+    $('#mask-status').textContent = tool === 'rect' ? '红色矩形：在图上拖动框出要修复的区域' :
+      tool === 'sam-point' ? '左键添加前景点，右键添加背景点' :
       tool === 'sam-box' ? '在图像上拖动框选目标' :
       tool === 'uncertain' || tool === 'uncertainty' ? '红色：不确定区（默认禁修，须强制放行才可保守）' :
       tool === 'unrestorable' ? '深红：不可复原区（禁止任何像素修复）' :
-      tool === 'eraser' ? '橡皮：同时清除可修掩膜与标红区' :
+      tool === 'eraser' ? '橡皮：同时清除可修区域与标红区' :
       '琥珀/红：可修露底选区（仅保守）';
   }
 
@@ -169,7 +172,7 @@
         regionCanvas.style.width = `${image.clientWidth}px`;
         regionCanvas.style.height = `${image.clientHeight}px`;
       }
-      $('#mask-status').textContent = `掩膜 ${Math.round(maskFraction() * 10000) / 100}% · ${state.image.width} × ${state.image.height}`;
+      $('#mask-status').textContent = `修复范围 ${Math.round(maskFraction() * 10000) / 100}% · ${state.image.width} × ${state.image.height}`;
     });
   }
 
@@ -268,7 +271,7 @@
       state.autoBusy = false; setAutoStatus(AUTO_HINT);
       $('#candidate-strip').innerHTML = '<div class="empty-inline">修复候选会显示在这里</div>';
       $('#comparison-stage').innerHTML = '<div class="empty-inline">选择候选查看结果</div>';
-      $('#event-log').innerHTML = '<div class="empty-log">完成掩膜后生成候选。</div>';
+      $('#event-log').innerHTML = '<div class="empty-log">完成修复范围后生成候选。</div>';
       return Promise.resolve();
     }
     state.keepEmpty = false;
@@ -291,7 +294,7 @@
     $('#job-status').textContent = '尚未开始'; $('#job-progress').style.width = '0%';
     $('#job-percent').textContent = '0%';
     $('#progress-estimate').textContent = '等待任务';
-    $('#event-log').innerHTML = '<div class="empty-log">完成掩膜后生成候选。</div>';
+    $('#event-log').innerHTML = '<div class="empty-log">完成修复范围后生成候选。</div>';
     $('#mask-fraction').textContent = '';
     $('[data-action="save-result"]').disabled = true;
     $('[data-action="select-candidate"]').disabled = true;
@@ -339,7 +342,7 @@
   function installMaskFromSource(source) {
     const width = canvas.width || source.naturalWidth || source.width;
     const height = canvas.height || source.naturalHeight || source.height;
-    if (!width || !height) { toast('掩膜载入时画布尺寸未知，请重新载入图像。'); return; }
+    if (!width || !height) { toast('选区载入时画布尺寸未知，请重新载入图像。'); return; }
     state.baseMask = maskLayerFrom(source, width, height);
     $('#mask-gate-confirmed').checked = false;
     state.maskStrokes = []; state.regionStrokes = []; state.strokeOrder = []; state.currentStroke = null; state.maskDirty = false;
@@ -357,7 +360,7 @@
         }
         catch (error) { reject(error); }
       };
-      maskImage.onerror = () => { toast('掩膜读取失败。'); reject(new Error('掩膜读取失败。')); };
+      maskImage.onerror = () => { toast('选区读取失败。'); reject(new Error('选区读取失败。')); };
       maskImage.src = url;
     });
   }
@@ -373,7 +376,7 @@
         }
         catch (error) { reject(error); }
       };
-      maskImage.onerror = () => { toast('掩膜读取失败。'); reject(new Error('掩膜读取失败。')); };
+      maskImage.onerror = () => { toast('选区读取失败。'); reject(new Error('选区读取失败。')); };
       maskImage.src = `data:image/png;base64,${data}`;
     });
   }
@@ -405,7 +408,7 @@
       return toast('AI 尝试性补全需要已安装扩散模型（models/sd-inpainting）。');
     }
     if (isProfessional()) {
-      if (!$('#mask-gate-confirmed')?.checked) return toast('专业分步：请勾选「已核对掩膜与依据」后再进入下一档。');
+      if (!$('#mask-gate-confirmed')?.checked) return toast('专业分步：请勾选「已核对修复范围与依据」后再进入下一档。');
       if ($('#evidence-level').value === 'observation') return toast('专业分步：observation 只可记录观察，不能执行修复。');
       if (!generative && hasUnrestorableRegions()) return toast('存在不可复原红区：禁止任何像素修复，请只导出标注图与报告。');
       if (!generative && hasUncertainRegions()) {
@@ -439,7 +442,7 @@
     if (!isProfessional() && !generative) {
       const requestedMode = $('#repair-mode')?.value || 'conservative';
       if (requestedMode === 'enhanced' || requestedMode === 'speculative') {
-        if (!$('#mask-gate-confirmed')?.checked) return toast('请勾选「已核对掩膜与依据」后再执行加强或推测修复。');
+        if (!$('#mask-gate-confirmed')?.checked) return toast('请勾选「已核对修复范围与依据」后再执行加强或推测修复。');
         if (!$('#risk-ack')?.checked) {
           return toast(requestedMode === 'speculative'
             ? '推测性补全须勾选风险提示已知悉。'
@@ -451,7 +454,7 @@
     setBusy(true);
     try {
       const rationale = ($('#rationale')?.value || '').trim() ||
-        `依据：仅处理经人工确认的当前选区，掩膜外像素保持不变。${generative ? ' AI 尝试性补全结果是推测，不是历史原貌，只能按假设归档。' : ($('#repair-mode').value === 'speculative' ? ' 推测结果仅作假设性建议，需人工复核。' : ' AI 补全仅为待复核候选，不代表历史原貌。')}`;
+        `依据：仅处理经人工确认的当前选区，修复范围之外的像素保持不变。${generative ? ' AI 尝试性补全结果是推测，不是历史原貌，只能按假设归档。' : ($('#repair-mode').value === 'speculative' ? ' 推测结果仅作假设性建议，需人工复核。' : ' AI 补全仅为待复核候选，不代表历史原貌。')}`;
       const mask = await invoke('saveMask', state.image.id, exportMaskBase64(), JSON.stringify(state.proposalIds || []));
       const request = { image_id: state.image.id, mask_id: mask.id,
         backend: generative ? 'diffusion' : $('#repair-backend').value, planner: $('#planner').value,
@@ -664,7 +667,7 @@
         + `<p><b>本地检测</b> ${escapeHtml(region.local_evidence || '未记录可观察依据')}</p>`
         + `<p><b>本地修复</b> ${region.candidate
           ? `${escapeHtml(region.candidate.method || region.candidate.tool)}${region.candidate.parameters?.tool ? ` · ${escapeHtml(region.candidate.parameters.tool)}` : ''}`
-          : '还没有本地修复候选'} · 掩膜占比 ${(Number(region.local_mask_fraction || 0) * 100).toFixed(2)}%</p>`
+          : '还没有本地修复候选'} · 修复范围占比 ${(Number(region.local_mask_fraction || 0) * 100).toFixed(2)}%</p>`
         + `<p><b>DeepSeek 观察</b> ${escapeHtml(region.observation)}</p>`
         + `<p><b>修复评价</b> ${escapeHtml(region.repair_assessment)}</p>`
         + `<p><b>修复建议</b> ${escapeHtml(region.repair_suggestion)}</p>`
@@ -672,7 +675,7 @@
         + `<p><b>不确定性</b> ${escapeHtml(region.uncertainty)}</p>`
         + `<p class="ai-reason"><b>复核原因</b> ${escapeHtml(region.review_reason || '模型未给出原因')}</p>`
         + `</article>`).join('')
-      + `<div class="notice">AI 评估仅为建议：不会修改掩膜、像素或审核状态。`
+      + `<div class="notice">AI 评估仅为建议：不会修改修复范围、像素或审核状态。`
       + `${record.limitations ? ` ${escapeHtml(record.limitations)}` : ''}</div>`;
   }
 
@@ -733,6 +736,42 @@
     }
   }
 
+  async function autoConfirmDefect(index) {
+    const item = state.damageItems[index];
+    if (!item?.proposal_id || !state.image) return;
+    const result = await invoke('autoConfirmDefect', JSON.stringify({
+      image_id: state.image.id, proposal_ids: [item.proposal_id],
+    }));
+    if (result.skipped?.length) return toast(result.skipped[0].reason || '未能确认该区域。');
+    const defect = result.defects?.[0];
+    if (!defect) return toast('未能确认该区域。');
+    Object.assign(item, defect);
+    renderDamage();
+    renderReviewHistory();
+    const kind = result.generated?.[0];
+    toast(kind === 'sam' ? '已确认并生成 SAM 修复范围，请核对后使用。'
+      : kind === 'kept' ? '已确认该区域，沿用已有的修复范围。'
+      : '已确认并按矩形生成修复范围，可再用画笔修正。');
+  }
+
+  async function autoConfirmAll() {
+    if (!state.image) return toast('请先打开一幅壁画。');
+    if (!state.damageItems.length) return toast('清单里还没有可确认的区域。');
+    const ids = state.damageItems.filter(item => item.proposal_id).map(item => item.proposal_id);
+    if (!ids.length) return toast('清单里还没有可确认的区域。');
+    const result = await invoke('autoConfirmDefect', JSON.stringify({
+      image_id: state.image.id, proposal_ids: ids,
+    }));
+    const byId = new Map((result.defects || []).map(defect => [defect.proposal_id, defect]));
+    state.damageItems.forEach(item => {
+      if (item.proposal_id && byId.has(item.proposal_id)) Object.assign(item, byId.get(item.proposal_id));
+    });
+    renderDamage();
+    renderReviewHistory();
+    const count = result.defects?.length || 0;
+    toast(`已确认 ${count} 个区域${result.skipped?.length ? `，跳过 ${result.skipped.length} 个：${result.skipped[0].reason}` : ''}。`);
+  }
+
   async function saveRecommendation(index) {
     const item = state.damageItems[index];
     if (!item?.proposal_id || !state.image) return;
@@ -770,7 +809,7 @@
       const { events } = await invoke('listReviewEvents', state.image.id);
       if (!events?.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
       const labels = { identification_confirm: '识别确认', identification_expert_review: '标记专家复核',
-        region_update: '修改区域/掩膜', recommendation_update: '修改修复建议', region_remove: '删除区域',
+        region_update: '修改区域/修复范围', recommendation_update: '修改修复建议', region_remove: '删除区域',
         candidate_accept: '接受候选', candidate_reject: '驳回候选', candidate_expert_review: '候选标记专家复核',
         candidate_experimental_preview: '试验性预览', candidate_select: '选定候选' };
       box.classList.remove('hidden');
@@ -853,8 +892,8 @@
     layoutComparison();
     const metrics = candidate.metrics || {};
     const maskLabel = metrics.evaluated_mask === 'enhanced_work_mask'
-      ? '扩大工作掩膜（enhanced_work_mask）外'
-      : (metrics.evaluated_mask === 'original_mask' ? '原始掩膜（mask.png）外' : '掩膜外');
+      ? '扩大后的修复范围（enhanced_work_mask）外'
+      : (metrics.evaluated_mask === 'original_mask' ? '原始修复范围（mask.png）外' : '修复范围外');
     $('#candidate-device').textContent = `${candidate.versions?.device || ''} · ${candidate.elapsed_seconds || 0}s`;
     $('#candidate-metrics').textContent = `${maskLabel}最大差异 ${metrics.outside_max_difference ?? '-'} · 边界色差 ${metrics.boundary_color_gap ?? '-'} · ${candidate.speculative ? '推测性内容需单独复核' : (candidate.enhanced || state.job?.mode === 'enhanced') ? '加强修复·选区附近纹理补全·非历史定稿' : '工程指标不代表历史真实性'}`;
     $('[data-action="select-candidate"]').disabled = ACTIVE.includes(state.job?.status);
@@ -1224,29 +1263,31 @@
       const disabled = alreadyQueued || busy;
       const pending = needsManualSelection(item);
       const confirmed = item.confirmed !== false;
-      const maskText = ({ sam: '掩膜：SAM 2.1 候选', needs_review: '掩膜：未可靠分割，请人工修正',
-        observation: '掩膜：观察类，不默认补洞', manual: '掩膜：人工修正' })[item.mask_status]
-        || (item.mask_status ? `掩膜：${item.mask_status}` : '');
+      const maskText = ({ sam: '修复范围：SAM 2.1 候选', needs_review: '修复范围：未可靠分割，请人工修正',
+        observation: '修复范围：观察类，不默认补洞', manual: '修复范围：人工修正' })[item.mask_status]
+        || (item.mask_status ? `修复范围：${item.mask_status}` : '');
       const hint = pending ? '模型框仅用于定位。请核对图像后手动框选。'
-        : (item.risk_notice || item.mask_notice || (!item.proposal_id ? '暂无掩膜，运行时会按框生成矩形掩膜。' : ''));
+        : (item.risk_notice || item.mask_notice || (!item.proposal_id ? '暂无修复范围，运行时会按框生成矩形范围。' : ''));
       const details = [item.size, `框选约 ${extent.toFixed(2)}%`,
         Number.isFinite(item.confidence) ? `置信 ${Math.round(item.confidence * 100)}%` : '',
         item.model_source, item.risk_level ? `风险 ${DAMAGE_RISKS[item.risk_level] || '待判断'}` : ''].filter(Boolean);
       const observations = [['可观察现象', item.observation], ['依据', item.evidence],
         ['模型修复建议', item.repair_suggestion], ['不确定性', item.uncertainty]]
         .filter(([, value]) => value).map(([label, value]) => `<small>${label}：${escapeHtml(value)}</small>`).join('');
+      const identification = item.identification_status || (item.confirmed ? 'confirmed' : 'pending');
       const confirmButton = item.proposal_id && !confirmed
         ? `<button class="button" data-confirm-defect="${index}" ${disabled ? 'disabled' : ''}>确认此项</button>` : '';
+      const autoConfirmButton = item.proposal_id && (identification !== 'confirmed' || !item.mask_file_url)
+        ? `<button class="button primary" data-auto-confirm="${index}" ${disabled ? 'disabled' : ''}>一键确认并生成修复范围</button>` : '';
       const removeButton = item.proposal_id
         ? `<button class="icon-button" data-remove-defect="${index}" ${disabled ? 'disabled' : ''} title="删除此项">删除</button>` : '';
-      const maskButton = `<button class="icon-button" data-edit-mask="${index}" ${disabled ? 'disabled' : ''}>${item.mask_file_url ? '修改掩膜' : '绘制掩膜'}</button>`;
+      const maskButton = `<button class="icon-button" data-edit-mask="${index}" ${disabled ? 'disabled' : ''}>${item.mask_file_url ? '修改修复范围' : '绘制修复范围'}</button>`;
       const repairButton = item.proposal_id && item.mask_file_url && confirmed
         ? `<button class="button" data-repair-defect="${index}" ${disabled ? 'disabled' : ''}>生成修复候选</button>` : '';
       const recommendationButton = item.proposal_id
         ? `<button class="icon-button" data-save-recommendation="${index}" ${disabled ? 'disabled' : ''} title="把当前选择的修补方案保存为该区域的修复建议；旧候选将标记为待更新">保存建议</button>` : '';
       const regionExpertButton = item.proposal_id
         ? `<button class="icon-button" data-region-expert="${index}" ${disabled ? 'disabled' : ''}>标记需专家复核</button>` : '';
-      const identification = item.identification_status || (item.confirmed ? 'confirmed' : 'pending');
       const identificationText = ({ pending: '识别待确认', confirmed: '识别已确认',
         expert_review: '识别已确认 · 需专家复核' })[identification] || identification;
       const revisionText = item.revision ? ` · 版本 ${item.revision}` : '';
@@ -1265,7 +1306,7 @@
         `<option value="color" ${selectedMethod === 'color' ? 'selected' : ''}>局部色调匹配</option></select></label>` +
         `${maskText ? `<small>${escapeHtml(maskText)}${confirmed ? ' · <span class="damage-confirmed">已确认</span>' : ''}</small>` : ''}` +
         `${hint ? `<small>${escapeHtml(hint)}</small>` : ''}${statusText ? `<small>${statusText}</small>` : ''}</div>` +
-        `<div class="damage-item-actions">${confirmButton}${maskButton}${removeButton}${recommendationButton}${regionExpertButton}${repairButton}${pending
+        `<div class="damage-item-actions">${autoConfirmButton}${confirmButton}${maskButton}${removeButton}${recommendationButton}${regionExpertButton}${repairButton}${pending
           ? `<button class="button" data-draw-defect="${index}" ${disabled ? 'disabled' : ''}>手动框选此候选</button>`
           : `<button class="button" data-run-defect="${index}" ${disabled || !canRun ? 'disabled' : ''}>运行修复</button>`}</div></div>`;
     }).join('');
@@ -1287,6 +1328,9 @@
     }));
     $$('[data-region-expert]').forEach(button => button.addEventListener('click', () => {
       markRegionExpert(Number(button.dataset.regionExpert)).catch(notifyError);
+    }));
+    $$('[data-auto-confirm]').forEach(button => button.addEventListener('click', () => {
+      autoConfirmDefect(Number(button.dataset.autoConfirm)).catch(notifyError);
     }));
     const generativeToggle = $('#damage-generative');
     if (generativeToggle) generativeToggle.onchange = () => renderDamage();
@@ -1314,7 +1358,7 @@
       action: 'confirm', proposal_id: item.proposal_id }));
     Object.assign(item, defect);
     renderDamage();
-    toast('已确认该缺损项；掩膜不准确时请先“修改掩膜”，再运行修复。');
+    toast('已确认该缺损项；修复范围不准确时请先“修改修复范围”，再运行修复。');
   }
 
   async function removeLocalDefect(index) {
@@ -1342,25 +1386,25 @@
       redrawMask();
     }
     setTool('brush');
-    toast('用画笔修正该缺损的掩膜，然后点“保存缺损掩膜”。');
+    toast('用画笔修正该缺损的修复范围，然后点“保存该区域范围”。');
   }
 
   async function saveMaskToDefect() {
     const item = state.maskEditTarget;
-    if (!item || !item.proposal_id || !state.image) return toast('请先从缺损清单选择“修改掩膜”。');
-    if (!maskHasPixels()) return toast('画布上没有掩膜像素，请先圈选需要修复的区域。');
+    if (!item || !item.proposal_id || !state.image) return toast('请先从缺损清单选择“修改修复范围”。');
+    if (!maskHasPixels()) return toast('画布上没有选区像素，请先圈选需要修复的区域。');
     const { defect } = await invoke('editLocalDefect', state.image.id, JSON.stringify({
       action: 'update', proposal_id: item.proposal_id, mask_data: exportMaskBase64() }));
     Object.assign(item, defect);
     renderDamage();
-    toast('已保存人工修正的掩膜；请复核后再运行修复。');
+    toast('已保存人工修正的修复范围；请复核后再运行修复。');
   }
 
   async function generateRegionRepairs(proposalIds) {
     if (!state.image) return toast('请先打开一幅壁画。');
     if (state.running || state.autoBusy) return toast('请等待当前分析或修复任务完成。');
     const ids = [...new Set((proposalIds || []).filter(Boolean))];
-    if (!ids.length) return toast('请先确认缺损项并准备好掩膜，再生成修复候选。');
+    if (!ids.length) return toast('请先确认缺损项并准备好修复范围，再生成修复候选。');
     setBusy(true);
     try {
       const result = await invoke('generateRegionRepairs', JSON.stringify({
@@ -1429,7 +1473,7 @@
         notifyError(failed[0]?.error || new Error('没有可运行的缺损项。'));
         return;
       }
-      if (failed.length) toast(`${failed.length} 项无法自动生成掩膜，已跳过；其余继续运行。`);
+      if (failed.length) toast(`${failed.length} 项无法自动生成修复范围，已跳过；其余继续运行。`);
       const result = await invoke('runDefectRepairs', JSON.stringify({
         image_id: state.image.id, proposal_ids: proposalIds, methods,
         generative_attempt: generativeAttempt,
@@ -1558,6 +1602,51 @@
     }
   }
 
+  function rectBBox(drawing) {
+    const x0 = Math.min(drawing.start[0], drawing.end[0]) / canvas.width * 1000;
+    const y0 = Math.min(drawing.start[1], drawing.end[1]) / canvas.height * 1000;
+    const x1 = Math.max(drawing.start[0], drawing.end[0]) / canvas.width * 1000;
+    const y1 = Math.max(drawing.start[1], drawing.end[1]) / canvas.height * 1000;
+    return [x0, y0, x1, y1].map(value => Math.round(value));
+  }
+
+  function updateRectDraft() {
+    const drawing = state.rectDraw;
+    if (!drawing || !canvas.width || !canvas.height) return;
+    const node = $('#damage-highlight');
+    if (!node) return;
+    Object.assign(node.style, bboxPercent(rectBBox(drawing)));
+    node.classList.add('visible');
+  }
+
+  async function finishRectDraw() {
+    const drawing = state.rectDraw;
+    if (!drawing || !state.image) return;
+    const imageId = state.image.id;
+    state.rectDraw = null;
+    const [x0, y0, x1, y1] = rectBBox(drawing);
+    if (x1 - x0 < 4 || y1 - y0 < 4) {
+      clearDamageHighlight();
+      toast('框选太小，请重新拖动一个更大的红色矩形。');
+      return;
+    }
+    try {
+      const { defect } = await invoke('addManualDefect', imageId, JSON.stringify({
+        bbox: [x0, y0, x1, y1], type: 'manual', size: 'manual',
+      }));
+      if (state.image?.id !== imageId) return;
+      state.damageItems.push(defect);
+      state.selectedDamage = defect;
+      showDamageHighlight(defect);
+      renderDamage();
+      toast('已添加红色矩形选区；点“一键确认并生成修复范围”或直接生成修复候选。');
+    } catch (error) {
+      if (state.image?.id !== imageId) return;
+      clearDamageHighlight();
+      notifyError(error);
+    }
+  }
+
   function renderReferences(records) {
     state.references = records || [];
     $('#reference-list').innerHTML = state.references.map(item => `<button class="reference-item ${item.id === state.selectedReference ? 'selected' : ''}" data-reference="${item.id}">${escapeHtml(item.name)}<small>${escapeHtml(item.metadata?.group || '')} · ${escapeHtml(item.metadata?.relation || '')} · 相似度 ${item.retrieval_score}</small></button>`).join('') || '<div class="empty-inline">没有匹配参考图</div>';
@@ -1660,6 +1749,7 @@
           }
           break;
         }
+        case 'auto-confirm-all': await autoConfirmAll(); break;
         case 'run-all-defects': await runDefectRepairs(state.damageItems.map((_, index) => index)); break;
         case 'generate-region-repairs': {
           const ids = state.damageItems
@@ -1863,7 +1953,7 @@
   syncProfessionalUi();
   $('#professional-step').checked = true;
   $('#planner').addEventListener('change', event => {
-    $('#planner-note').textContent = event.target.value === 'api' ? '会向已配置服务发送图像缩略图、掩膜预览和备注。' : event.target.value === 'local' ? '本地 Qwen3-VL 分析图像，不发送数据。' : '本地规则不会发送图像。';
+    $('#planner-note').textContent = event.target.value === 'api' ? '会向已配置服务发送图像缩略图、选区预览和备注。' : event.target.value === 'local' ? '本地 Qwen3-VL 分析图像，不发送数据。' : '本地规则不会发送图像。';
   });
   $('#comparison-mode').addEventListener('change', renderComparison);
   $('#history-filter').addEventListener('input', () => renderHistory());
@@ -1881,6 +1971,12 @@
       updateDamageDraft();
       return;
     }
+    if (state.tool === 'rect') {
+      event.preventDefault();
+      state.rectDraw = { start: point, end: point };
+      updateRectDraft();
+      return;
+    }
     if (state.tool === 'sam-point') {
       state.promptPoints.push(point); state.promptLabels.push(event.button === 2 ? 0 : 1); toast('已记录分割提示点。'); return;
     }
@@ -1891,6 +1987,11 @@
     paintStroke(state.currentStroke); state.maskDirty = true; setBusy(state.running);
   });
   canvas.addEventListener('pointermove', event => {
+    if (state.rectDraw) {
+      state.rectDraw.end = pointAt(event);
+      updateRectDraft();
+      return;
+    }
     if (state.damageDraw) {
       state.damageDraw.end = pointAt(event);
       updateDamageDraft();
@@ -1903,6 +2004,10 @@
     if (state.tool === 'sam-box' && state.promptBox && event.buttons) state.promptBox.splice(2, 2, ...pointAt(event));
   });
   canvas.addEventListener('pointerup', () => {
+    if (state.rectDraw) {
+      finishRectDraw().catch(notifyError);
+      return;
+    }
     if (state.damageDraw) {
       finishDamageDraw().catch(notifyError);
       return;
@@ -1928,9 +2033,16 @@
     if (event.target.matches('input,textarea,select')) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'o') { event.preventDefault(); openImage(); return; }
     if (event.key.toLowerCase() === 'b') setTool('brush');
+    if (event.key.toLowerCase() === 'r') setTool('rect');
     if (event.key.toLowerCase() === 'e') setTool('eraser');
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); handleAction('undo'); }
     if (event.key === 'Escape') {
+      if (state.rectDraw) {
+        state.rectDraw = null;
+        clearDamageHighlight();
+        toast('已取消矩形圈选。');
+        return;
+      }
       if (state.damageDrawMode) {
         state.damageDrawMode = false; state.damageDraw = null; state.damageDrawTarget = null;
         $('#canvas-wrap').classList.remove('damage-drawing');

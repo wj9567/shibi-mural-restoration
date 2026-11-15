@@ -279,6 +279,9 @@ textarea { resize: vertical; min-height: 66px; line-height: 1.5; }
 .damage-status-line { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
 .damage-confirmed { color: #2f6b3a; }
 .canvas-wrap.damage-drawing #mask-canvas { cursor: crosshair; }
+.tool-button[data-tool="rect"] { border-color: #c94b36; color: #a83220; font-weight: 600; }
+.tool-button[data-tool="rect"].active { background: #fde7df; border-color: #c94b36; box-shadow: 0 0 0 1px #c94b36 inset; }
+.canvas-wrap.rect-select #mask-canvas { cursor: crosshair; }
 .manual-repair-settings { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
 .manual-repair-settings summary { cursor: pointer; color: var(--muted); font-size: 11px; }
 .manual-repair-settings .run-button { margin-top: 6px; }

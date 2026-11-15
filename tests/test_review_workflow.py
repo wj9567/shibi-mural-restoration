@@ -156,7 +156,7 @@ def test_manual_mask_change_marks_candidates_and_ai_review_stale(tmp_path):
 
     job = store.get('job', job_id)
     assert job['candidates'][0]['stale'] is True
-    assert '掩膜' in job['candidates'][0]['stale_reason']
+    assert '修复范围' in job['candidates'][0]['stale_reason']
     assert job['ai_review']['stale'] is True
     assessments = store.list('assessment')
     assert assessments and assessments[0]['stale'] is True
@@ -234,7 +234,7 @@ def test_engine_export_blocks_stale_region_candidates(tmp_path):
                                                  ((20, 50), (20, 80)))),
                                      [proposal_id], mask_source='manual', user_confirmed=True)
     store.update('job', job_id, mask_id=mask_record['id'], mask_file_url=None)
-    review_workflow.bump_revision(store, proposal_id, '掩膜或区域已人工修改', action='region_update')
+    review_workflow.bump_revision(store, proposal_id, '修复范围或区域已人工修改', action='region_update')
     with pytest.raises(ValueError, match='过期'):
         engine.export(job_id)
     engine.executor.shutdown(wait=False)
@@ -269,3 +269,75 @@ def test_standard_job_selection_still_works_and_is_audited(tmp_path):
     assert events[0]['proposal_id'] == ''
     engine.executor.shutdown(wait=False)
     bridge.aux_executor.shutdown(wait=False)
+
+
+def test_auto_confirm_creates_a_range_when_none_exists(tmp_path):
+    bridge, engine, store, image, proposal_id, job_id, candidate_id = make_region_case(tmp_path)
+    (store.folder(proposal_id) / 'mask.png').unlink()
+    store.update('proposal', proposal_id, confirmed=False, identification={'status': 'pending'})
+    result = json.loads(bridge.autoConfirmDefect(json.dumps({
+        'image_id': image['id'], 'proposal_ids': [proposal_id]})))
+    assert result['generated'] == ['rectangle']       # SAM weights are absent in this fixture
+    defect = result['defects'][0]
+    assert defect['identification_status'] == 'confirmed'
+    assert defect['mask_file_url'] and defect['revision'] == 2
+    proposal = store.get('proposal', proposal_id)
+    assert proposal['confirmed'] is True and proposal['metadata']['mask_status'] == 'manual'
+    assert (store.folder(proposal_id) / 'mask.png').is_file()
+    events = json.loads(bridge.listReviewEvents(image['id']))['events']
+    assert any(event['action'] == 'auto_confirm' for event in events)
+    engine.executor.shutdown(wait=False)
+    bridge.aux_executor.shutdown(wait=False)
+
+
+def test_auto_confirm_keeps_existing_range_without_bumping_revision(tmp_path):
+    bridge, engine, store, image, proposal_id, job_id, candidate_id = make_region_case(tmp_path)
+    store.update('proposal', proposal_id, confirmed=False, identification={'status': 'pending'})
+    result = json.loads(bridge.autoConfirmDefect(json.dumps({
+        'image_id': image['id'], 'proposal_ids': [proposal_id]})))
+    assert result['generated'] == ['kept']
+    proposal = store.get('proposal', proposal_id)
+    assert proposal['revision'] == 1 and proposal['confirmed'] is True
+    assert store.get('job', job_id)['candidates'][0].get('stale') is not True
+    engine.executor.shutdown(wait=False)
+    bridge.aux_executor.shutdown(wait=False)
+
+
+def test_auto_confirm_uses_sam_when_available(tmp_path, monkeypatch):
+    bridge, engine, store, image, proposal_id, job_id, candidate_id = make_region_case(tmp_path)
+    (store.folder(proposal_id) / 'mask.png').unlink()
+    store.update('proposal', proposal_id, confirmed=False, identification={'status': 'pending'})
+
+    def fake_predict(working, box=None):
+        mask = np.zeros((working.shape[0], working.shape[1]), np.uint8)
+        mask[box[1]:box[3], box[0]:box[2]] = 255
+        return mask, {'predicted_iou': .93}
+
+    monkeypatch.setattr(engine.sam, 'available', lambda: True)
+    monkeypatch.setattr(engine.sam, 'predict', fake_predict)
+    result = json.loads(bridge.autoConfirmDefect(json.dumps({
+        'image_id': image['id'], 'proposal_ids': [proposal_id]})))
+    assert result['generated'] == ['sam']
+    assert result['defects'][0]['mask_status'] == 'sam'
+    engine.executor.shutdown(wait=False)
+    bridge.aux_executor.shutdown(wait=False)
+
+
+def test_auto_confirm_skips_region_without_a_box(tmp_path):
+    bridge, engine, store, image, proposal_id, job_id, candidate_id = make_region_case(tmp_path)
+    empty_id = new_id()
+    store.put('proposal', {'id': empty_id, 'image_id': image['id'], 'created_at': '2026-11-16T00:00:09+00:00',
+                           'confirmed': False, 'metadata': {'type': 'crack'}})
+    result = json.loads(bridge.autoConfirmDefect(json.dumps({
+        'image_id': image['id'], 'proposal_ids': [empty_id]})))
+    assert result['defects'] == []
+    assert '定位框' in result['skipped'][0]['reason']
+    engine.executor.shutdown(wait=False)
+    bridge.aux_executor.shutdown(wait=False)
+
+
+def test_user_facing_ui_text_avoids_the_jargon_word():
+    from mural_agent.config import ROOT
+    for name in ('index.html', 'app.js'):
+        text = (ROOT / 'ui' / name).read_text(encoding='utf-8')
+        assert (chr(0x63A9) + chr(0x819C)) not in text, name
