@@ -628,7 +628,14 @@
     const methodNames = { lama: 'LaMa 纹理补全', telea: 'Telea 快速行进', ns: 'Navier–Stokes 边缘传播',
       reference: '已核验壁画参考', diffusion: '扩散补全', imagine: 'Grok Imagine 全图重绘',
       denoise: '局部降噪', color: '局部色调匹配', deblur: '局部锐化', research: '研究模型' };
-    $('#candidate-strip').innerHTML = candidates.map((candidate, index) => `<button class="candidate-card ${candidate.id === state.candidate?.id ? 'active' : ''}" data-candidate="${candidate.id}"><img src="${fileUrl(candidate.file_url)}"><span>${index + 1}. ${escapeHtml(methodNames[candidate.tool] || candidate.tool)}</span></button>`).join('');
+    const reviewLabels = { accepted: '已采纳', accepted_hypothesis: '假设归档', rejected: '已驳回',
+      expert_review: '待专家复核', experimental_preview: '试验性预览', pending: '待审核' };
+    $('#candidate-strip').innerHTML = candidates.map((candidate, index) => {
+      const stateLabel = candidate.stale
+        ? '<em class="candidate-state stale">已过期</em>'
+        : (candidate.review?.status ? `<em class="candidate-state">${escapeHtml(reviewLabels[candidate.review.status] || candidate.review.status)}</em>` : '');
+      return `<button class="candidate-card ${candidate.id === state.candidate?.id ? 'active' : ''}" data-candidate="${candidate.id}"><img src="${fileUrl(candidate.file_url)}"><span>${index + 1}. ${escapeHtml(methodNames[candidate.tool] || candidate.tool)}</span>${stateLabel}</button>`;
+    }).join('');
     $$('.candidate-card').forEach(item => item.addEventListener('click', () => {
       state.candidate = candidates.find(candidate => candidate.id === item.dataset.candidate); renderCandidates(job); renderComparison();
       if (job.selected_id === state.candidate?.id && job.review?.note && !$('#review-note').value) $('#review-note').value = job.review.note;
@@ -669,6 +676,23 @@
       + `${record.limitations ? ` ${escapeHtml(record.limitations)}` : ''}</div>`;
   }
 
+  async function reviewCandidateAction(action) {
+    if (!state.job || !state.candidate) return toast('请先选择一个修复候选。');
+    if (state.running || state.autoBusy) return toast('请等待当前任务完成。');
+    const result = await invoke('reviewCandidate', JSON.stringify({
+      job_id: state.job.id, candidate_id: state.candidate.id, action,
+      note: $('#review-note').value || '',
+      archive_as_hypothesis: Boolean($('#archive-hypothesis')?.checked),
+    }));
+    state.job = result.job;
+    state.candidate = (result.job.candidates || []).find(item => item.id === result.candidate.id) || result.candidate;
+    renderJob(state.job); renderCandidates(state.job);
+    await refresh();
+    toast(action === 'expert_review'
+      ? '已标记需要专家复核；正式导出会被阻止。'
+      : '已记录试验性预览：仅为推测性参考，不会作为正式审核结果导出。');
+  }
+
   async function assessRepair() {
     if (!state.image || !state.job || !state.candidate) return toast('请先选择一个本地修复候选。');
     if (!state.lastSnapshot?.models?.deepseek_vision) return toast('请先在 API 设置保存 DeepSeek 密钥。');
@@ -686,6 +710,53 @@
         + '<div class="notice">本地修复结果与人工审核不受影响，可继续操作。</div>';
       notifyError(error);
     }
+  }
+
+  async function saveRecommendation(index) {
+    const item = state.damageItems[index];
+    if (!item?.proposal_id || !state.image) return;
+    const methodNames = { lama: 'LaMa 纹理补全', telea: 'Telea 局部纹理传播',
+      ns: 'Navier–Stokes 细线修补', color: '局部色调匹配' };
+    const method = item.selectedMethod && item.selectedMethod !== 'recommended'
+      ? (methodNames[item.selectedMethod] || item.selectedMethod)
+      : (item.recommendation?.method || '');
+    if (!method) return toast('请先在“修补方案”中选择一种方案，再保存为修复建议。');
+    const { defect } = await invoke('editLocalDefect', state.image.id, JSON.stringify({
+      action: 'recommendation', proposal_id: item.proposal_id, method,
+    }));
+    Object.assign(item, defect);
+    renderDamage();
+    renderReviewHistory();
+    toast('修复建议已保存；旧修复候选与 AI 评估已标记为待更新。');
+  }
+
+  async function markRegionExpert(index) {
+    const item = state.damageItems[index];
+    if (!item?.proposal_id || !state.image) return;
+    const { defect } = await invoke('editLocalDefect', state.image.id, JSON.stringify({
+      action: 'expert_review', proposal_id: item.proposal_id, note: '标记需要专家复核',
+    }));
+    Object.assign(item, defect);
+    renderDamage();
+    renderReviewHistory();
+    toast('已把该区域标记为需要专家复核；正式导出会被阻止，直到重新确认。');
+  }
+
+  async function renderReviewHistory() {
+    const box = $('#review-history');
+    if (!box || !state.image) return;
+    try {
+      const { events } = await invoke('listReviewEvents', state.image.id);
+      if (!events?.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+      const labels = { identification_confirm: '识别确认', identification_expert_review: '标记专家复核',
+        region_update: '修改区域/掩膜', recommendation_update: '修改修复建议', region_remove: '删除区域',
+        candidate_accept: '接受候选', candidate_reject: '驳回候选', candidate_expert_review: '候选标记专家复核',
+        candidate_experimental_preview: '试验性预览', candidate_select: '选定候选' };
+      box.classList.remove('hidden');
+      box.innerHTML = '<strong>审核记录</strong>' + events.slice(0, 12).map(event =>
+        `<div class="review-event"><span>${escapeHtml((event.created_at || '').slice(5, 16).replace('T', ' '))}</span>`
+        + `${escapeHtml(labels[event.action] || event.action)}${event.note ? ` · ${escapeHtml(event.note)}` : ''}</div>`).join('');
+    } catch (error) { console.warn(error); }
   }
 
   function renderRegionPanel(job = state.job) {    const panel = $('#region-panel');
@@ -1098,6 +1169,7 @@
     }
     renderDamage();
     showModal('damage-modal');
+    renderReviewHistory();
   }
 
   function renderDamage() {
@@ -1149,12 +1221,21 @@
       const maskButton = `<button class="icon-button" data-edit-mask="${index}" ${disabled ? 'disabled' : ''}>${item.mask_file_url ? '修改掩膜' : '绘制掩膜'}</button>`;
       const repairButton = item.proposal_id && item.mask_file_url && confirmed
         ? `<button class="button" data-repair-defect="${index}" ${disabled ? 'disabled' : ''}>生成修复候选</button>` : '';
+      const recommendationButton = item.proposal_id
+        ? `<button class="icon-button" data-save-recommendation="${index}" ${disabled ? 'disabled' : ''} title="把当前选择的修补方案保存为该区域的修复建议；旧候选将标记为待更新">保存建议</button>` : '';
+      const regionExpertButton = item.proposal_id
+        ? `<button class="icon-button" data-region-expert="${index}" ${disabled ? 'disabled' : ''}>标记需专家复核</button>` : '';
+      const identification = item.identification_status || (item.confirmed ? 'confirmed' : 'pending');
+      const identificationText = ({ pending: '识别待确认', confirmed: '识别已确认',
+        expert_review: '识别已确认 · 需专家复核' })[identification] || identification;
+      const revisionText = item.revision ? ` · 版本 ${item.revision}` : '';
       // Only a persisted, unconfirmed proposal blocks running; a bare model box
       // still runs through the existing manual-selection path.
       const canRun = !item.proposal_id || confirmed;
       return `<div class="damage-item ${item === state.selectedDamage ? 'selected' : ''}" data-damage-row="${index}">` +
         `<div class="damage-item-main"><button class="damage-select" data-damage="${index}">${String(index + 1).padStart(2, '0')} ${escapeHtml(DAMAGE_LABELS[item.type] || '其他疑似缺损')}</button>` +
         `<small>${escapeHtml(details.join(' · '))}</small>${observations}` +
+        `<small class="defect-state">${escapeHtml(identificationText + revisionText)}</small>` +
         `<small>${escapeHtml(method ? `建议：${method}` : '')}</small><label class="damage-method">修补方案 <select data-method-defect="${index}" ${disabled || generative ? 'disabled' : ''}>` +
         `<option value="recommended" ${selectedMethod === 'recommended' ? 'selected' : ''}>采用建议</option>` +
         `<option value="lama" ${selectedMethod === 'lama' ? 'selected' : ''} ${state.lastSnapshot?.models?.lama ? '' : 'disabled'}>LaMa AI 纹理补全${state.lastSnapshot?.models?.lama ? '' : '（未安装，将回退 Telea）'}</option>` +
@@ -1163,7 +1244,7 @@
         `<option value="color" ${selectedMethod === 'color' ? 'selected' : ''}>局部色调匹配</option></select></label>` +
         `${maskText ? `<small>${escapeHtml(maskText)}${confirmed ? ' · <span class="damage-confirmed">已确认</span>' : ''}</small>` : ''}` +
         `${hint ? `<small>${escapeHtml(hint)}</small>` : ''}${statusText ? `<small>${statusText}</small>` : ''}</div>` +
-        `<div class="damage-item-actions">${confirmButton}${maskButton}${removeButton}${repairButton}${pending
+        `<div class="damage-item-actions">${confirmButton}${maskButton}${removeButton}${recommendationButton}${regionExpertButton}${repairButton}${pending
           ? `<button class="button" data-draw-defect="${index}" ${disabled ? 'disabled' : ''}>手动框选此候选</button>`
           : `<button class="button" data-run-defect="${index}" ${disabled || !canRun ? 'disabled' : ''}>运行修复</button>`}</div></div>`;
     }).join('');
@@ -1179,6 +1260,12 @@
     $$('[data-repair-defect]').forEach(button => button.addEventListener('click', () => {
       const item = state.damageItems[Number(button.dataset.repairDefect)];
       generateRegionRepairs([item?.proposal_id]).catch(notifyError);
+    }));
+    $$('[data-save-recommendation]').forEach(button => button.addEventListener('click', () => {
+      saveRecommendation(Number(button.dataset.saveRecommendation)).catch(notifyError);
+    }));
+    $$('[data-region-expert]').forEach(button => button.addEventListener('click', () => {
+      markRegionExpert(Number(button.dataset.regionExpert)).catch(notifyError);
     }));
     const generativeToggle = $('#damage-generative');
     if (generativeToggle) generativeToggle.onchange = () => renderDamage();
@@ -1566,6 +1653,8 @@
           break;
         }
         case 'assess-repair': await assessRepair(); break;
+        case 'review-expert': await reviewCandidateAction('expert_review'); break;
+        case 'review-preview': await reviewCandidateAction('experimental_preview'); break;
         case 'cancel-job': { const identifier = state.activeJobId || state.job?.id; if (identifier) { await invoke('cancelJob', identifier); } await refresh(); break; }
         case 'resume-job': if (state.job) await invoke('resumeJob', state.job.id); await refresh(); break;
         case 'select-candidate': {
