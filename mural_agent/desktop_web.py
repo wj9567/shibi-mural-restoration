@@ -706,6 +706,177 @@ class Bridge(QObject):
         return self._result(action)
 
     @Slot(str, result=str)
+    def acceptDetectedRegion(self, request_json):
+        """Turn one AI box (even without a stored region) into a ready repair region."""
+        def action():
+            request = json.loads(request_json)
+            image = self.store.get('image', request.get('image_id'))
+            if not image:
+                raise ValueError('图像记录不存在。')
+            proposal_id = request.get('proposal_id')
+            if proposal_id:
+                proposal = self.store.get('proposal', proposal_id)
+                if not proposal or proposal.get('image_id') != image['id']:
+                    raise ValueError('缺损记录不存在或不属于当前图像。')
+            else:
+                try:
+                    bbox = [int(value) for value in request.get('bbox') or []]
+                except (TypeError, ValueError) as exc:
+                    raise ValueError('AI 区域框无效。') from exc
+                if len(bbox) != 4:
+                    raise ValueError('AI 区域框无效。')
+                x0, y0, x1, y1 = [max(0, min(1000, value)) for value in bbox]
+                x0, x1 = min(x0, x1), max(x0, x1)
+                y0, y1 = min(y0, y1), max(y0, y1)
+                if x1 - x0 < 3 or y1 - y0 < 3:
+                    raise ValueError('AI 区域框太小，请手动框选。')
+                width, height = image['width'], image['height']
+                metadata = {
+                    'type': str(request.get('type') or 'other')[:40],
+                    'bbox': [x0, y0, x1, y1],
+                    'bbox_pixels': [x0 * width // 1000, y0 * height // 1000,
+                                    min(width, (x1 * width + 999) // 1000),
+                                    min(height, (y1 * height + 999) // 1000)],
+                    'evidence': str(request.get('evidence') or 'AI 标出的疑似病害区域')[:500],
+                    'recommendation': request.get('recommendation') or {'method': 'LaMa 纹理补全', 'backend': 'lama'},
+                    'model_source': str(request.get('model_source') or 'AI 检测框')[:80],
+                    'local_detection': True, 'mask_status': '',
+                }
+                proposal_id = new_id()
+                self.store.put('proposal', {
+                    'id': proposal_id, 'image_id': image['id'], 'created_at': timestamp(),
+                    'fraction': 0.0, 'confirmed': False, 'mask_source': 'manual',
+                    'region_class': 'fillable_lacuna', 'revision': 1,
+                    'metadata': metadata,
+                })
+            try:
+                result = self.autoConfirmDefect(json.dumps({
+                    'image_id': image['id'], 'proposal_ids': [proposal_id]}))
+                payload = json.loads(result)
+                if payload.get('error'):
+                    raise ValueError(payload['error'])
+                if not payload.get('defects'):
+                    raise ValueError((payload.get('skipped') or [{}])[0].get('reason', '未能确认该区域。'))
+                return {'defect': payload['defects'][0], 'generated': payload['generated'][0],
+                        'proposal_id': proposal_id}
+            except ValueError:
+                if not request.get('proposal_id'):
+                    self.store.delete('proposal', proposal_id)
+                raise
+        return self._result(action)
+
+    @Slot(str, result=str)
+    def composeFinalRepair(self, request_json):
+        """Merge every finished region repair into one full-image result."""
+        def action():
+            request = json.loads(request_json)
+            image = self.store.get('image', request.get('image_id'))
+            if not image:
+                raise ValueError('图像记录不存在。')
+            import numpy as np
+            from .imaging import image_array, make_difference, sha256
+            from . import review_workflow
+            folder = self.store.folder(image['id'])
+            original = image_array(folder / 'image.png')
+            height, width = original.shape[:2]
+            composite = original.copy()
+            union = np.zeros((height, width), bool)
+            rows, skipped = [], []
+            jobs = self.store.list('job')
+            proposals = [proposal for proposal in self.store.list('proposal')
+                         if proposal.get('image_id') == image['id']
+                         and (proposal.get('metadata') or {}).get('type')]
+            proposals.sort(key=lambda proposal: proposal.get('created_at') or '')
+            for proposal in proposals:
+                mask_path = self.store.folder(proposal['id']) / 'mask.png'
+                if not mask_path.is_file():
+                    continue
+                mask = mask_array(mask_path)
+                if mask.shape != (height, width) or not (mask > 0).any():
+                    skipped.append({'proposal_id': proposal['id'], 'reason': '修复范围不可用'})
+                    continue
+                candidates = [job for job in jobs if job.get('defect_proposal_id') == proposal['id']
+                              and job.get('status') == 'review' and job.get('candidates')]
+                if not candidates:
+                    skipped.append({'proposal_id': proposal['id'], 'reason': '还没有完成的修复候选'})
+                    continue
+                job = candidates[0]
+                candidate = next((item for item in job['candidates'] if item['id'] == job.get('selected_id')),
+                                 job['candidates'][0])
+                stale, stale_reason = review_workflow.candidate_stale(self.store, job, candidate)
+                if stale:
+                    skipped.append({'proposal_id': proposal['id'], 'reason': stale_reason})
+                    continue
+                result_path = self.store.folder(candidate['id']) / 'result.png'
+                if not result_path.is_file():
+                    skipped.append({'proposal_id': proposal['id'], 'reason': '修复结果文件缺失'})
+                    continue
+                repaired = np.asarray(Image.open(result_path).convert('RGB'))
+                if repaired.shape != original.shape:
+                    skipped.append({'proposal_id': proposal['id'], 'reason': '修复结果尺寸不一致'})
+                    continue
+                active = mask > 0
+                composite[active] = repaired[active]
+                union |= active
+                metadata = proposal.get('metadata') or {}
+                rows.append({
+                    'proposal_id': proposal['id'],
+                    'type': metadata.get('type'),
+                    'candidate_id': candidate['id'],
+                    'job_id': job['id'],
+                    'tool': candidate.get('tool'),
+                    'review_status': review_workflow.candidate_state(candidate),
+                    'accepted': review_workflow.candidate_state(candidate) in {'accepted', 'accepted_hypothesis'},
+                })
+            if not rows:
+                raise ValueError('还没有可以合并的修复结果；请先生成并完成至少一个区域的修复候选。')
+            difference = make_difference(original, composite)
+            Image.fromarray(composite).save(folder / 'final-repair.png')
+            Image.fromarray(difference).save(folder / 'final-difference.png')
+            outside_unchanged = bool(np.array_equal(composite[~union], original[~union]))
+            checks = {
+                'size_match': composite.shape[:2] == (height, width),
+                'outside_unchanged': outside_unchanged,
+                'original_unchanged': sha256(folder / 'image.png') == image['working_sha256'],
+            }
+            summary = {
+                'image_id': image['id'], 'created_at': timestamp(), 'regions': rows,
+                'skipped': skipped, 'checks': checks,
+                'accepted_regions': sum(1 for row in rows if row['accepted']),
+            }
+            (folder / 'final-repair.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2),
+                                                      encoding='utf-8')
+            return {
+                'file_url': self._file_url(folder / 'final-repair.png'),
+                'difference_url': self._file_url(folder / 'final-difference.png'),
+                'regions': rows, 'skipped': skipped, 'checks': checks,
+                'accepted_regions': summary['accepted_regions'],
+            }
+        return self._result(action)
+
+    @Slot(str, result=str)
+    def saveFinalRepair(self, request_json):
+        """Save the merged final image (optional explicit path for automation)."""
+        def action():
+            request = json.loads(request_json)
+            image = self.store.get('image', request.get('image_id'))
+            if not image:
+                raise ValueError('图像记录不存在。')
+            source = self.store.folder(image['id']) / 'final-repair.png'
+            if not source.is_file():
+                raise ValueError('还没有生成修复后总图，请先生成。')
+            path = request.get('path')
+            if not path:
+                path, _ = QFileDialog.getSaveFileName(None, '保存修复后总图', 'final-repair.png',
+                                                      'PNG 图像 (*.png)')
+            if not path:
+                return {'saved': False}
+            shutil.copy2(source, path)
+            self.notify.emit('修复后总图已保存。')
+            return {'saved': True, 'path': str(path)}
+        return self._result(action)
+
+    @Slot(str, result=str)
     def reviewCandidate(self, request_json):
         """Stage 6: accept / reject / expert-review / preview one repair candidate."""
         def action():

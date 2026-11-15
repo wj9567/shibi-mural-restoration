@@ -8,7 +8,7 @@
     auxVersion: -1, damageItems: [], damageSummary: '', selectedDamage: null, activeJobId: null, running: false, autoBusy: false,
     damageDrawMode: false, damageDraw: null, damageDrawTarget: null, damageJobKey: null, maskEditTarget: null,
     rectDraw: null,
-    aiAssessment: null,
+    aiAssessment: null, finalRepair: null,
     batchJobIds: [], defectSubmitting: false, triple: { largeJobId: null, fullJobId: null } };
   const canvas = $('#mask-canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -238,6 +238,7 @@
 
   function loadImage(record) {
     clearDamageHighlight(); hideModal('damage-modal'); hideModal('triple-modal'); resetAiReview();
+    state.finalRepair = null; renderFinal(null);
     state.triple = { largeJobId: null, fullJobId: null };
     state.batchJobIds = [];
     renderBatchJobs([]);
@@ -736,6 +737,29 @@
     }
   }
 
+  async function acceptDetectedRegion(index) {
+    const item = state.damageItems[index];
+    if (!item || !state.image) return;
+    const result = await invoke('acceptDetectedRegion', JSON.stringify({
+      image_id: state.image.id, bbox: item.bbox,
+      type: item.type === 'manual' ? 'other' : item.type,
+      evidence: item.evidence || item.observation || '',
+      recommendation: item.recommendation || undefined,
+      model_source: item.model_source || 'AI 检测框',
+    }));
+    const defect = result.defect;
+    const currentIndex = state.damageItems.indexOf(item);
+    if (currentIndex >= 0) state.damageItems.splice(currentIndex, 1, defect);
+    else state.damageItems.push(defect);
+    state.selectedDamage = defect;
+    showDamageHighlight(defect);
+    renderDamage();
+    renderReviewHistory();
+    toast(result.generated === 'sam'
+      ? '已直接确认为待修复区域（按 SAM 自动生成范围），现在可生成修复候选。'
+      : '已直接确认为待修复区域（按 AI 框生成矩形范围），可先生成候选或再用画笔修整。');
+  }
+
   async function autoConfirmDefect(index) {
     const item = state.damageItems[index];
     if (!item?.proposal_id || !state.image) return;
@@ -757,6 +781,12 @@
   async function autoConfirmAll() {
     if (!state.image) return toast('请先打开一幅壁画。');
     if (!state.damageItems.length) return toast('清单里还没有可确认的区域。');
+    // AI boxes that were never stored as local regions are confirmed one by one first.
+    for (const item of [...state.damageItems]) {
+      if (item.proposal_id) continue;
+      const index = state.damageItems.indexOf(item);
+      if (index >= 0) await acceptDetectedRegion(index);
+    }
     const ids = state.damageItems.filter(item => item.proposal_id).map(item => item.proposal_id);
     if (!ids.length) return toast('清单里还没有可确认的区域。');
     const result = await invoke('autoConfirmDefect', JSON.stringify({
@@ -817,6 +847,50 @@
         `<div class="review-event"><span>${escapeHtml((event.created_at || '').slice(5, 16).replace('T', ' '))}</span>`
         + `${escapeHtml(labels[event.action] || event.action)}${event.note ? ` · ${escapeHtml(event.note)}` : ''}</div>`).join('');
     } catch (error) { console.warn(error); }
+  }
+
+  function renderFinal(record) {
+    const panel = $('#final-panel');
+    if (!panel) return;
+    if (!record) {
+      panel.classList.add('hidden');
+      $('#final-images').innerHTML = '';
+      $('#final-note').textContent = '';
+      $('[data-action="save-final"]').disabled = true;
+      return;
+    }
+    panel.classList.remove('hidden');
+    const regions = record.regions || [];
+    const skipped = record.skipped || [];
+    $('#final-meta').textContent = `${regions.length} 个区域已合并 · 已采纳 ${record.accepted_regions || 0} 个 · `
+      + `尺寸检查${record.checks?.size_match ? '通过' : '未通过'} · 范围外${record.checks?.outside_unchanged ? '未改动' : '有改动'}`;
+    const stamp = Date.now();
+    $('#final-images').innerHTML =
+      `<figure><img src="${fileUrl(state.image.file_url)}?v=${stamp}" alt="修复前"><figcaption>修复前</figcaption></figure>`
+      + `<figure><img src="${fileUrl(record.file_url)}?v=${stamp}" alt="修复后总图"><figcaption>修复后总图</figcaption></figure>`
+      + `<figure><img src="${fileUrl(record.difference_url)}?v=${stamp}" alt="差异图"><figcaption>差异图</figcaption></figure>`;
+    $('#final-note').textContent = skipped.length
+      ? `未合并 ${skipped.length} 个区域：${skipped[0].reason}${skipped.length > 1 ? ' 等' : ''}。`
+      : '所有已完成的区域修复已合并；修复范围之外的像素保持原图不变。';
+    $('[data-action="save-final"]').disabled = false;
+  }
+
+  async function composeFinalRepair() {
+    if (!state.image) return toast('请先打开一幅壁画。');
+    try {
+      const record = await invoke('composeFinalRepair', JSON.stringify({ image_id: state.image.id }));
+      state.finalRepair = record;
+      renderFinal(record);
+      toast('已生成所有区域合并后的修复后总图。');
+    } catch (error) { notifyError(error); }
+  }
+
+  async function saveFinalRepair() {
+    if (!state.image || !state.finalRepair) return toast('请先生成修复后总图。');
+    try {
+      const result = await invoke('saveFinalRepair', JSON.stringify({ image_id: state.image.id }));
+      if (result.saved) toast('修复后总图已保存。');
+    } catch (error) { notifyError(error); }
   }
 
   function renderRegionPanel(job = state.job) {    const panel = $('#region-panel');
@@ -1278,7 +1352,9 @@
       const confirmButton = item.proposal_id && !confirmed
         ? `<button class="button" data-confirm-defect="${index}" ${disabled ? 'disabled' : ''}>确认此项</button>` : '';
       const autoConfirmButton = item.proposal_id && (identification !== 'confirmed' || !item.mask_file_url)
-        ? `<button class="button primary" data-auto-confirm="${index}" ${disabled ? 'disabled' : ''}>一键确认并生成修复范围</button>` : '';
+        ? `<button class="button primary" data-auto-confirm="${index}" ${disabled ? 'disabled' : ''}>直接确认为待修复区域</button>` : '';
+      const acceptRegionButton = !item.proposal_id
+        ? `<button class="button primary" data-accept-region="${index}" ${disabled ? 'disabled' : ''}>直接确认为待修复区域</button>` : '';
       const removeButton = item.proposal_id
         ? `<button class="icon-button" data-remove-defect="${index}" ${disabled ? 'disabled' : ''} title="删除此项">删除</button>` : '';
       const maskButton = `<button class="icon-button" data-edit-mask="${index}" ${disabled ? 'disabled' : ''}>${item.mask_file_url ? '修改修复范围' : '绘制修复范围'}</button>`;
@@ -1306,7 +1382,7 @@
         `<option value="color" ${selectedMethod === 'color' ? 'selected' : ''}>局部色调匹配</option></select></label>` +
         `${maskText ? `<small>${escapeHtml(maskText)}${confirmed ? ' · <span class="damage-confirmed">已确认</span>' : ''}</small>` : ''}` +
         `${hint ? `<small>${escapeHtml(hint)}</small>` : ''}${statusText ? `<small>${statusText}</small>` : ''}</div>` +
-        `<div class="damage-item-actions">${autoConfirmButton}${confirmButton}${maskButton}${removeButton}${recommendationButton}${regionExpertButton}${repairButton}${pending
+        `<div class="damage-item-actions">${autoConfirmButton}${acceptRegionButton}${confirmButton}${maskButton}${removeButton}${recommendationButton}${regionExpertButton}${repairButton}${pending
           ? `<button class="button" data-draw-defect="${index}" ${disabled ? 'disabled' : ''}>手动框选此候选</button>`
           : `<button class="button" data-run-defect="${index}" ${disabled || !canRun ? 'disabled' : ''}>运行修复</button>`}</div></div>`;
     }).join('');
@@ -1331,6 +1407,9 @@
     }));
     $$('[data-auto-confirm]').forEach(button => button.addEventListener('click', () => {
       autoConfirmDefect(Number(button.dataset.autoConfirm)).catch(notifyError);
+    }));
+    $$('[data-accept-region]').forEach(button => button.addEventListener('click', () => {
+      acceptDetectedRegion(Number(button.dataset.acceptRegion)).catch(notifyError);
     }));
     const generativeToggle = $('#damage-generative');
     if (generativeToggle) generativeToggle.onchange = () => renderDamage();
@@ -1772,6 +1851,8 @@
         case 'export-repair-report':
           await exportPdf('exportRepairReport', { job_id: state.job?.id });
           break;
+        case 'compose-final': await composeFinalRepair(); break;
+        case 'save-final': await saveFinalRepair(); break;
         case 'open-demo-guide': await openDemoGuide(); break;
         case 'close-demo-guide': hideModal('demo-modal'); break;
         case 'cancel-job': { const identifier = state.activeJobId || state.job?.id; if (identifier) { await invoke('cancelJob', identifier); } await refresh(); break; }

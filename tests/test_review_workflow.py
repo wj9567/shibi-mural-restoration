@@ -341,3 +341,88 @@ def test_user_facing_ui_text_avoids_the_jargon_word():
     for name in ('index.html', 'app.js'):
         text = (ROOT / 'ui' / name).read_text(encoding='utf-8')
         assert (chr(0x63A9) + chr(0x819C)) not in text, name
+
+
+def add_region(store, image, box, color, accepted=True):
+    proposal_id, job_id, candidate_id = new_id(), new_id(), new_id()
+    x0, y0, x1, y1 = box
+    mask = np.zeros((image['height'], image['width']), np.uint8)
+    mask[y0:y1, x0:x1] = 255
+    Image.fromarray(mask).save(store.folder(proposal_id) / 'mask.png')
+    store.put('proposal', {'id': proposal_id, 'image_id': image['id'],
+                           'created_at': '2026-11-16T00:00:03+00:00', 'fraction': float(mask.mean()),
+                           'confirmed': True, 'mask_source': 'manual', 'revision': 1,
+                           'metadata': {'type': 'paint_loss', 'bbox_pixels': list(box),
+                                        'recommendation': {'backend': 'lama', 'method': 'LaMa 纹理补全'}}})
+    original = np.asarray(Image.open(store.folder(image['id']) / 'image.png').convert('RGB'))
+    result = original.copy()
+    result[y0:y1, x0:x1] = color
+    Image.fromarray(result).save(store.folder(candidate_id) / 'result.png')
+    Image.fromarray(np.zeros_like(original)).save(store.folder(candidate_id) / 'difference.png')
+    store.put('job', {'id': job_id, 'image_id': image['id'], 'mask_id': new_id(), 'status': 'review',
+                      'defect_proposal_id': proposal_id, 'candidates': [{'id': candidate_id, 'tool': 'lama',
+                      'parameters': {'tool': 'lama'}, 'proposal_revision': 1}]})
+    return proposal_id, job_id, candidate_id
+
+
+def test_ai_box_without_a_stored_region_becomes_ready_in_one_click(tmp_path):
+    bridge, engine, store, image, proposal_id, job_id, candidate_id = make_region_case(tmp_path)
+    result = json.loads(bridge.acceptDetectedRegion(json.dumps({
+        'image_id': image['id'], 'bbox': [400, 100, 700, 300], 'type': 'fading',
+        'evidence': 'AI 标出的褪色区域'})))
+    defect = result['defect']
+    assert result['generated'] == 'rectangle'      # SAM weights are absent in this fixture
+    assert defect['proposal_id'] and defect['mask_file_url']
+    assert defect['identification_status'] == 'confirmed' and defect['confirmed'] is True
+    assert (store.folder(defect['proposal_id']) / 'mask.png').is_file()
+    assert store.get('proposal', defect['proposal_id'])['metadata']['type'] == 'fading'
+    engine.executor.shutdown(wait=False)
+    bridge.aux_executor.shutdown(wait=False)
+
+
+def test_compose_final_merges_all_regions_and_skips_stale(tmp_path):
+    bridge, engine, store, image, proposal_id, job_id, candidate_id = make_region_case(tmp_path)
+    second_id, _, _ = add_region(store, image, (60, 50, 90, 80), [30, 180, 90])
+    record = json.loads(bridge.composeFinalRepair(json.dumps({'image_id': image['id']})))
+    assert len(record['regions']) == 2
+    assert record['checks']['size_match'] is True
+    assert record['checks']['outside_unchanged'] is True
+    assert record['checks']['original_unchanged'] is True
+    final = np.asarray(Image.open(store.folder(image['id']) / 'final-repair.png'))
+    assert final.shape[:2] == (image['height'], image['width'])
+    assert np.all(final[20:44, 20:44] == [200, 120, 90])
+    assert np.all(final[50:80, 60:90] == [30, 180, 90])
+    original = np.asarray(Image.open(store.folder(image['id']) / 'image.png').convert('RGB'))
+    outside = np.ones(final.shape[:2], bool)
+    outside[20:44, 20:44] = False
+    outside[50:80, 60:90] = False
+    assert np.array_equal(final[outside], original[outside])
+
+    review_workflow.bump_revision(store, second_id, '测试：使旧候选过期')
+    record = json.loads(bridge.composeFinalRepair(json.dumps({'image_id': image['id']})))
+    assert len(record['regions']) == 1
+    assert any('过期' in item['reason'] for item in record['skipped'])
+    engine.executor.shutdown(wait=False)
+    bridge.aux_executor.shutdown(wait=False)
+
+
+def test_save_final_repair_with_explicit_path(tmp_path):
+    bridge, engine, store, image, proposal_id, job_id, candidate_id = make_region_case(tmp_path)
+    json.loads(bridge.composeFinalRepair(json.dumps({'image_id': image['id']})))
+    target = tmp_path / 'final.png'
+    saved = json.loads(bridge.saveFinalRepair(json.dumps({'image_id': image['id'], 'path': str(target)})))
+    assert saved['saved'] is True
+    assert target.is_file()
+    missing = json.loads(bridge.saveFinalRepair(json.dumps({'image_id': new_id()})))
+    assert 'error' in missing
+    engine.executor.shutdown(wait=False)
+    bridge.aux_executor.shutdown(wait=False)
+
+
+def test_compose_final_requires_a_finished_candidate(tmp_path):
+    bridge, engine, store, image, proposal_id, job_id, candidate_id = make_region_case(tmp_path)
+    store.update('job', job_id, candidates=[])
+    result = json.loads(bridge.composeFinalRepair(json.dumps({'image_id': image['id']})))
+    assert 'error' in result and '合并' in result['error']
+    engine.executor.shutdown(wait=False)
+    bridge.aux_executor.shutdown(wait=False)
