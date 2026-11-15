@@ -892,3 +892,44 @@ def test_ai_repair_review_panel_renders_advisory_fields(window, qt_app):
         assert token in panel, token
     assert run_js(window, "document.querySelectorAll('#ai-review-panel [data-ai-region]').length") == 1
     assert run_js(window, "document.querySelector('#ai-review-panel .ai-region').classList.contains('needs-review')") is True
+
+
+def test_review_states_audit_history_and_expert_actions_render(window, qt_app):
+    """Stage 6: identification badge, per-region actions, candidate state and audit trail."""
+    image = load_plain_fixture(window, qt_app)
+    made = json.loads(window.bridge.addManualDefect(image['id'], json.dumps({
+        'bbox': [300, 250, 700, 750], 'type': 'paint_loss', 'size': 'medium'})))
+    defect = made['defect']
+    confirmed = json.loads(window.bridge.editLocalDefect(image['id'], json.dumps({
+        'action': 'confirm', 'proposal_id': defect['proposal_id']})))['defect']
+    assert confirmed['identification_status'] == 'confirmed'
+    assert run_js(window, f"window.__shibui.state.damageItems = {json.dumps([confirmed])};"
+                          " window.__shibui.renderDamage(); true") is True
+    assert run_js(window, "document.querySelectorAll('[data-region-expert]').length") == 1
+    assert run_js(window, "document.querySelectorAll('[data-save-recommendation]').length") == 1
+    assert '识别已确认' in run_js(window, "document.querySelector('#damage-list').textContent")
+    assert run_js(window, "Boolean(document.querySelector('[data-action=\"review-expert\"]') && document.querySelector('[data-action=\"review-preview\"]'))") is True
+
+    # Open the damage list: the audit trail renders from persisted events.
+    run_js(window, "document.querySelector('[data-action=\"open-damage-list\"]').click(); true")
+    assert wait_until(qt_app, lambda: '识别确认' in (run_js(window, "document.querySelector('#review-history').textContent") or ''), 10)
+
+    # Accept a real local candidate, then the candidate strip shows its review state.
+    generated = json.loads(window.bridge.generateRegionRepairs(json.dumps({
+        'image_id': image['id'], 'proposal_ids': [defect['proposal_id']]})))
+    job_id = generated['jobs'][0]['id']
+
+    def finished():
+        jobs = json.loads(window.bridge.snapshot())['jobs']
+        record = next((item for item in jobs if item['id'] == job_id), None)
+        return record is not None and record['status'] not in ACTIVE
+
+    assert wait_until(qt_app, finished, 60)
+    job = next(item for item in json.loads(window.bridge.snapshot())['jobs'] if item['id'] == job_id)
+    accepted = json.loads(window.bridge.reviewCandidate(json.dumps({
+        'job_id': job_id, 'candidate_id': job['candidates'][0]['id'], 'action': 'accept', 'note': '界面验收'})))
+    assert accepted['candidate']['review']['status'] == 'accepted'
+    assert run_js(window, f"window.__shibui.state.job = {json.dumps(accepted['job'])};"
+                          " window.__shibui.state.candidate = null;"
+                          " window.__shibui.renderJob(window.__shibui.state.job); true") is True
+    assert '已采纳' in run_js(window, "document.querySelector('#candidate-strip').textContent")

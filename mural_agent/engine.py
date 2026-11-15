@@ -312,12 +312,18 @@ class Engine:
                         'outside_max_difference': int(metrics.get('outside_max_difference', 0)),
                         'masked_fraction': metrics.get('masked_fraction'),
                     }
+                    proposal_revision = None
+                    if job.get('defect_proposal_id'):
+                        from .review_workflow import revision
+                        proposal = self.store.get('proposal', job['defect_proposal_id'])
+                        proposal_revision = revision(proposal) if proposal else None
                     candidate = {'id': identifier, 'job_id': job_id, 'image_id': image['id'], 'mask_id': mask_record['id'],
                         'tool': step.tool, 'radius': step.radius, 'parameters': step.model_dump(),
                         'parent_version': image['id'],
                            'speculative': job.get('mode') == 'speculative',
                            'enhanced': job.get('mode') == 'enhanced',
                         'metrics': metrics, 'checks': checks, 'region': region_meta,
+                        'proposal_id': job.get('defect_proposal_id'), 'proposal_revision': proposal_revision,
                         'elapsed_seconds': round(time.monotonic()-started, 2), 'versions': versions,
                         'created_at': timestamp(), 'raw_sha256': sha256(folder/'raw.png'), 'result_sha256': sha256(folder/'result.png'),
                         'url': f'/api/assets/{identifier}/result.png', 'difference_url': f'/api/assets/{identifier}/difference.png'}
@@ -386,8 +392,8 @@ class Engine:
         if job['selected_id'] not in [c['id'] for c in job['candidates']]:
             raise ValueError('选中结果不属于当前任务。')
         candidate = self.store.get('candidate', job['selected_id'])
-        from .professional import validate_selected_export
-        selection = validate_selected_export(job, candidate)
+        from .review_workflow import export_guard
+        selection = export_guard(self.store, job, candidate)
         image = self.store.get('image', job['image_id'])
         mask = self.store.get('mask', job['mask_id'])
         self.validate_inputs(job, image, mask)

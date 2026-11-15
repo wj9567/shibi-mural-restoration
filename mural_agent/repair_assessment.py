@@ -218,6 +218,8 @@ def assessment_record(store, image, job, cases, assessment, rows, context):
         'advisory': True, 'context_used': bool(context.strip()),
         'limitations': assessment.limitations,
         'region_ids': [case['region_id'] for case in cases],
+        'revisions': {case['region_id']: int((store.get('proposal', case['region_id']) or {}).get('revision') or 1)
+                      for case in cases},
         'regions': rows,
     }
     store.put('assessment', record)

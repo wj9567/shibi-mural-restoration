@@ -143,6 +143,7 @@ class Bridge(QObject):
 
     def _local_defect(self, proposal):
         """One local-detection record in the shape the canvas and list expect."""
+        from .review_workflow import identification_state, revision
         metadata = proposal.get('metadata') or {}
         defect = {
             'index': 0, 'type': metadata.get('type') or 'other',
@@ -160,6 +161,8 @@ class Bridge(QObject):
             'mask_status': metadata.get('mask_status') or 'observation',
             'mask_notice': metadata.get('mask_notice') or '',
             'confirmed': bool(proposal.get('confirmed')),
+            'identification_status': identification_state(proposal),
+            'revision': revision(proposal),
             'proposal_id': proposal['id'],
         }
         mask_path = self.store.folder(proposal['id']) / 'mask.png'
@@ -593,24 +596,67 @@ class Bridge(QObject):
                 decision=decision)
             # An empty box must not erase a note restored from the archive/archive history.
             review_note = str(review_note).strip()[:2000] or (job.get('review') or {}).get('note', '')
-            return self._job(self.store.update(
+            self.store.update(
                 'job', job_id, selected_id=candidate_id, selected_as=selection['selected_as'],
                 review={'note': review_note, 'time': timestamp(),
                         'archive_as_hypothesis': selection['archive_as_hypothesis'],
-                        'decision': selection.get('decision')}))
+                        'decision': selection.get('decision')})
+            from .review_workflow import record_event, set_candidate_review
+            if selection['selected_as'] == 'rejected':
+                status = 'rejected'
+            elif selection['selected_as'] == 'hypothesis':
+                status = 'accepted_hypothesis'
+            else:
+                status = 'accepted'
+            set_candidate_review(self.store, job_id, candidate_id, status, review_note,
+                                 decision=selection.get('decision') or 'adopt')
+            record_event(self.store, image_id=job['image_id'],
+                         proposal_id=job.get('defect_proposal_id') or '',
+                         action='candidate_select',
+                         changes={'candidate_id': candidate_id, 'candidate_status': status,
+                                  'selected_as': selection['selected_as']},
+                         decision=selection.get('decision') or 'adopt', note=review_note)
+            return self._job(self.store.get('job', job_id))
+        return self._result(action)
+
+    @Slot(str, result=str)
+    def reviewCandidate(self, request_json):
+        """Stage 6: accept / reject / expert-review / preview one repair candidate."""
+        def action():
+            request = json.loads(request_json)
+            job = self.store.get('job', request.get('job_id'))
+            if not job:
+                raise ValueError('修复任务不存在。')
+            from .review_workflow import review_candidate
+            job, candidate, event = review_candidate(
+                self.store, job, request.get('candidate_id'), request.get('action') or '',
+                note=str(request.get('note') or ''),
+                archive_as_hypothesis=bool(request.get('archive_as_hypothesis')))
+            self.current_image_id = job['image_id']
+            return {'job': self._job(job), 'candidate': self._candidate(candidate), 'event': event}
+        return self._result(action)
+
+    @Slot(str, result=str)
+    def listReviewEvents(self, image_id):
+        """Stage 6 audit trail for one image, newest first."""
+        def action():
+            if not self.store.get('image', image_id):
+                raise ValueError('图像记录不存在。')
+            from .review_workflow import list_events
+            return {'events': list(reversed(list_events(self.store, image_id)))[:100]}
         return self._result(action)
 
     @Slot(str, result=str)
     def saveResult(self, candidate_id):
         def action():
-            from .professional import validate_selected_export
             job = next((j for j in self.store.list('job') if any(c.get('id') == candidate_id for c in j.get('candidates') or [])), None)
             if not job:
                 raise ValueError('修复候选不存在。')
             if job.get('selected_id') != candidate_id:
                 raise ValueError('请先在候选对照中选择并确认该候选，再保存修复图像。')
             candidate = next(c for c in job['candidates'] if c['id'] == candidate_id)
-            selection = validate_selected_export(job, candidate)
+            from .review_workflow import export_guard
+            selection = export_guard(self.store, job, candidate)
             if selection['selected_as'] in {'rejected', 'hypothesis'}:
                 raise ValueError('驳回或假设性结果不能保存为修复图像；请改用「导出修复档案」并标注为假设。')
             path, _ = QFileDialog.getSaveFileName(None, '保存修复结果', 'restored.png', 'PNG 图像 (*.png)')
@@ -875,11 +921,42 @@ class Bridge(QObject):
                 raise ValueError('缺损项不存在。')
             if proposal['image_id'] != image['id']:
                 raise ValueError('缺损项不属于当前图像。')
+            from .review_workflow import (bump_revision, mark_stale, record_event,
+                                          revision, set_identification)
+            note = str(payload.get('note') or '')[:2000]
             if action_name == 'remove':
+                mark_stale(self.store, proposal_id, '病害区域已删除')
+                record_event(self.store, image_id=image['id'], proposal_id=proposal_id,
+                             action='region_remove', changes={'revision': revision(proposal)},
+                             decision='removed', note=note)
                 self.store.delete('proposal', proposal_id)
                 return {'removed': True, 'proposal_id': proposal_id}
-            if action_name not in {'update', 'confirm'}:
+            if action_name == 'confirm':
+                proposal = set_identification(self.store, proposal, 'confirmed', note)
+                record_event(self.store, image_id=image['id'], proposal_id=proposal_id,
+                             action='identification_confirm', decision='confirmed', note=note)
+                return {'defect': self._local_defect(proposal)}
+            if action_name == 'expert_review':
+                proposal = set_identification(self.store, proposal, 'expert_review', note)
+                record_event(self.store, image_id=image['id'], proposal_id=proposal_id,
+                             action='identification_expert_review', decision='expert_review', note=note)
+                return {'defect': self._local_defect(proposal)}
+            if action_name == 'recommendation':
+                method = str(payload.get('method') or '').strip()[:200]
+                if not method:
+                    raise ValueError('请填写或选择修复建议。')
+                metadata = dict(proposal.get('metadata') or {})
+                recommendation = dict(metadata.get('recommendation') or {})
+                recommendation['method'] = method
+                metadata['recommendation'] = recommendation
+                self.store.update('proposal', proposal_id, metadata=metadata)
+                bump_revision(self.store, proposal_id, '修复建议已人工修改',
+                              changes={'method': method}, action='recommendation_update', note=note)
+                return {'defect': self._local_defect(self.store.get('proposal', proposal_id))}
+            if action_name != 'update':
                 raise ValueError('不支持的缺损编辑操作。')
+            changed = {'mask': bool(payload.get('mask_data')), 'bbox': bool(payload.get('bbox')),
+                       'type': bool(payload.get('type'))}
             metadata = dict(proposal.get('metadata') or {})
             fraction = proposal.get('fraction')
             mask_source = proposal.get('mask_source')
@@ -918,6 +995,12 @@ class Bridge(QObject):
                     metadata['type'] = str(payload['type'])[:40]
             proposal = self.store.update('proposal', proposal_id, metadata=metadata, confirmed=True,
                                          fraction=fraction, mask_source=mask_source)
+            if any(changed.values()):
+                # Any manual region change invalidates candidates made from the old mask.
+                bump_revision(self.store, proposal_id, '掩膜或区域已人工修改',
+                              changes={key: value for key, value in changed.items() if value},
+                              action='region_update', note=note)
+                proposal = self.store.get('proposal', proposal_id)
             return {'defect': self._local_defect(proposal)}
         return self._result(action)
 

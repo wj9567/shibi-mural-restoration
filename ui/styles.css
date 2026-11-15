@@ -183,6 +183,13 @@ textarea { resize: vertical; min-height: 66px; line-height: 1.5; }
 .ai-flag.ok { color: #2f6b3a; background: #e8f4ea; }
 .ai-reason { color: #7a3b12; }
 .ai-review-error { color: #9f2f1c; font-size: 12px; margin: 4px 0; }
+.defect-state { color: #6b5a2f; }
+.candidate-state { display: block; margin-top: 2px; font-size: 9px; font-style: normal; color: #7a3b12; }
+.candidate-state.stale { color: #9f2f1c; font-weight: 600; }
+.review-history { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 6px; font-size: 10px; color: var(--muted); max-height: 120px; overflow: auto; }
+.review-history.hidden { display: none; }
+.review-event { display: flex; gap: 6px; line-height: 1.6; }
+.review-event span { color: #8a94a3; min-width: 78px; }
 .comparison-toolbar { display: flex; align-items: center; gap: 8px; color: #858d96; font-size: 9px; }
 .comparison-toolbar select { width: 106px; padding: 5px 6px; }
 .comparison-toolbar input[type="range"] { flex: 1; min-width: 50px; }
