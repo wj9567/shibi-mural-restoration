@@ -11,6 +11,7 @@
 - 三分屏对照：原图 / AI 大面积修补 / 全 AI 重绘，用于方案比较；后两栏均为推测性结果。
 - 全图重绘可接 xAI Grok Imagine 等 OpenAI 兼容图片编辑服务（可选，需自备 API Key）；未配置时回退本地扩散。
 - 对照原图、修复候选和差异图，复核后保存图像或导出 ZIP 档案。
+- 缺损清单可对已确认掩膜生成本地修复候选：整图修复、区域修复和差异图，支持逐区域查看与重新生成；几何缺损优先 LaMa，褪色/污染不强制补洞。
 - 保存历史任务，支持查看、续跑、参考资料配准和工作空间备份。
 
 ## 安装
@@ -42,7 +43,7 @@ python -m venv .venv
 1. 打开应用并载入一幅壁画图像。
 2. 默认选择本地模型（Qwen3-VL）。点击“AI 分析缺损与文化线索”后，本地 Qwen3-VL 给出候选框，SAM 2.1 对几何缺损生成掩膜候选；未安装权重时界面会提示所需文件，手动画选不受影响。切换到 DeepSeek 云端需在“API 设置”的“DeepSeek 缺损分析”中填写密钥；只在点击分析时发送当前图像的缩小副本。
 3. 打开缺损清单，点击条目在主图定位；候选框与半透明掩膜、区域编号、病害类型会同时显示。逐项确认、修改掩膜或删除后再运行；DeepSeek 的定位框是粗略建议，须手动圈选实际修补区域后才能运行对应条目。
-4. 逐项运行，或运行全部。
+4. 逐项运行，或运行全部。需要本地自动修复时，点缺损清单里的“生成修复候选（本地补全）”，或逐项点“生成修复候选”；结果页会显示整图、区域和差异图，并可按区域“重新生成此区域”。
 5. 需要时打开“三分屏对照”，分别生成 AI 大面积修补和全 AI 图。
 5. 对比结果与差异，复核后保存图像或导出档案。
 
@@ -63,6 +64,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe scripts/verify_desktop.py
 .\.venv\Scripts\python.exe scripts/verify_local_detection.py
+.\.venv\Scripts\python.exe scripts/verify_region_repair.py
 ```
 
 测试包含本地业务逻辑、API 开发适配器和 Qt WebEngine 桌面桥接。CI（`.github/workflows/tests.yml`）在 Windows 上运行非 WebEngine 测试、`node --check` 与 `compileall`。完整依赖清单见 [requirements.txt](requirements.txt)、[requirements-models.txt](requirements-models.txt) 和 [requirements-dev.txt](requirements-dev.txt)。

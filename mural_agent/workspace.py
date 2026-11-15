@@ -57,7 +57,7 @@ def create_job(store, engine, image_record, mask_record, backend, planner, count
                evidence_level=None, expert_notes='', mask_source=None, allow_enhanced=False,
                risk_acknowledged=False, mask_gate_confirmed=False, has_unrestorable=False,
                has_uncertain=False, force_override=False, force_override_reason='',
-               allow_generative_attempt=False, full_generation=False):
+               allow_generative_attempt=False, full_generation=False, extra=None):
     from .planner import Budget
     from .imaging import mask_array
     from .professional import (WORKFLOW_PROFESSIONAL, normalize_workflow, normalize_mask_source,
@@ -160,6 +160,8 @@ def create_job(store, engine, image_record, mask_record, backend, planner, count
     if quality_thresholds and any(k not in {'boundary_pair_delta', 'boundary_gradient'} or not 0 <= float(v) <= 442 for k, v in quality_thresholds.items()):
         raise ValueError('质量阈值不合法。')
     identifier = new_id()
+    extra = {key: value for key, value in (extra or {}).items()
+             if key not in {'id', 'image_id', 'mask_id', 'status', 'candidates'}}
     job = {'id': identifier, 'image_id': image_record['id'], 'mask_id': mask_record['id'],
            'backend': backend, 'planner': planner, 'candidate_count': count, 'instructions': instructions[:2000],
            'status': 'queued', 'progress': 0, 'created_at': timestamp(), 'updated_at': timestamp(),
@@ -183,7 +185,8 @@ def create_job(store, engine, image_record, mask_record, backend, planner, count
            'force_override_reason': (force_override_reason or '')[:2000] if risk_flags['has_uncertain'] else '',
            'allow_generative_attempt': bool(allow_generative_attempt),
            'full_generation': bool(full_generation),
-           'selected_as': None}
+           'selected_as': None,
+           **extra}
     store.put('job', job)
     engine.submit(identifier)
     return job

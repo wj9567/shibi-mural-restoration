@@ -1,6 +1,6 @@
 # 验证状态
 
-更新时间：2026-11-16（阶段 3：本地 Qwen3-VL + SAM 2.1 识别与掩膜）
+更新时间：2026-11-16（阶段 4：本地自动修复与区域候选）
 
 ## 自动化测试
 
@@ -8,7 +8,7 @@
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-最近一次完整运行：**154 passed, 1 warning**（约 55 秒，exit 0；130 项非 WebEngine + 24 项 WebEngine）。覆盖：
+最近一次完整运行：**160 passed, 1 warning**（约 55 秒，exit 0；135 项非 WebEngine + 25 项 WebEngine）。覆盖：
 
 - 业务/API/规划器/存储/备份；
 - 风险分类与专业门禁（含两条门禁绕过回归：uncertain 掩膜、standard 工作流 enhanced）；
@@ -25,7 +25,11 @@
 - 本地病害识别（阶段 3）：Qwen 候选框从 0–1000 映射到原图像素（含百分比坐标自动换算）、只有通过尺寸/非空/置信分/越框面积/越框范围检查的 SAM 掩膜才标 `sam`、其余保留候选框并提示人工修正、褪色/污染不默认补洞、空结果、重复框、整图框、模型缺失；
 - 缺本地权重时给出安装提示且保留手动流程、不静默调用 DeepSeek；
 - 画布叠加候选框/半透明掩膜/编号/类型/来源，缺损清单确认、删除、修改掩膜、手动画选，`editLocalDefect` / `listLocalDefects` 的保存与恢复；
-- 未确认或缺掩膜的缺损项拒绝启动修复任务。
+- 未确认或缺掩膜的缺损项拒绝启动修复任务；
+- 本地自动修复（阶段 4）：已确认掩膜 → 单区域/多区域候选；裂隙、颜料缺失、起甲、手动区域优先 LaMa、缺权重回退 Telea；褪色/污染保持 color 路径且不经过 LaMa；
+- 区域任务保存整图 `result.png`、区域 `region.png`、整图/区域差异图，任务与候选写入 `checks`（输出尺寸、掩膜外一致性、原图未被修改）；
+- 修复失败（模拟模型崩溃）不产生候选、不改写原图，任务记录失败原因与 `original_unchanged`；
+- 结果页区域修复/差异预览、「重新生成此区域」按钮与 WebEngine 端到端（真实 Telea 修复 + 区域裁剪）。
 
 ## 本地 Qwen3-VL + SAM 2.1 真实推理（2026-11-16）
 
@@ -41,6 +45,21 @@
 - 报告：`artifacts/local-detection-verification.json`；叠加预览：`artifacts/local-detection-preview.png`；独立 SAM 探针（中心框）掩膜 900×626、覆盖率 21.6%、IoU 0.666，见 `artifacts/sam-probe-center.png`。
 - 坐标：Qwen 实际按百分比回答（例如 `[1,1,6,6]`），解析层自动换算到 0–1000 再映射到原图像素（`[9,6,54,38]`），与工作图尺寸一致。
 - 结论边界：只证明“权重能加载、两个模型能真实运行、掩膜坐标与工作图一致”，**不证明**病害识别准确率，也不证明这些候选框在真实壁画上定位正确。
+
+## 本地 LaMa 区域修复真实推理（2026-11-16）
+
+`scripts/verify_region_repair.py` 用真实 LaMa 权重跑一次完整区域修复并核验输出：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_region_repair.py
+```
+
+- 权重：`models/big-lama.pt`（196 MB，SHA-256 `344c77bbcb158f17dd143070d1e789f38a66c04202311ae3a258ef66667a9ea9`），由 `scripts/download_lama.py` 按固定 URL 下载并记录哈希。
+- 输入：`图片/01-cma-1963.252.jpg`（900×626），人工确认的左侧破损带掩膜（19,710 像素）；掩膜来自用户式框选而非模型猜测，用于单独验证修复引擎。
+- 结果：工具 `lama`，耗时 **8.46 秒**；输出 900×626 与原图一致，掩膜外最大差异 **0**，原图 SHA-256 未变；区域裁剪 67×482 与区域差异图均写入；任务/候选 `checks` 全部为 true；候选 `versions.weight_sha256` 与权重文件一致。
+- 设备：`cpu`。本机 torch 2.11.0+cu128 的 `get_arch_list()` 不含 `sm_89`（RTX 4060 Laptop 为 8.9），`LamaBackend` 因此按现有策略回退 CPU；这是当前策略的保守选择，不是模型失败。
+- 报告：`artifacts/region-repair-verification.json`；三联预览（原图/修复/差异）：`artifacts/region-repair-preview.png`。
+- 结论边界：证明“真实 LaMa 权重能加载、能修复、输出尺寸与掩膜外一致性成立、原图不被改写、模型与参数被记录”；**不证明**补全内容符合历史原貌，也不证明修复质量。
 
 ## 静态检查
 
@@ -76,6 +95,8 @@ git diff --check
 - 云端全图重绘依赖外部 API Key、网络与额度；本机测试通过本地代理 `127.0.0.1:12450` 访问 xAI，直接连接会超时。云端结果同样是推测，不是历史复原。
 - 比赛观察模式（观察包、human_gate、contest 门禁、演示脚本）已从代码与界面移除；本地 `data/demo_competition`、`data/human-gate` 旧目录未被引用，也未自动删除。
 - 本次未做交互式人工桌面点击验收（以离屏 WebEngine 外壳与 API/桥接回归代替）。
+- 区域修复质量本身没有专家评估：`outside_unchanged`、尺寸和哈希只证明“没改掩膜外、没改原图”，不证明补全得对。
+- LaMa 在本机回退 CPU 推理（torch 构建缺 `sm_89`），单区域约 8–9 秒；多区域依次执行，未做显存/速度优化。
 - 本机 `dist/Shibi-1.0` 是 2026-10-31 的旧构建，包含已删除的旧 UI 代码，不能作为当前交付物；需要重新构建或删除。
 - 工程像素指标与合成缺损测试不能证明补全内容符合壁画历史原貌。应用输出仅供数字修复实验与人工复核。
 
@@ -85,6 +106,8 @@ git diff --check
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m pytest -q -m "not web"
 .\.venv\Scripts\python.exe scripts/verify_desktop.py
+.\.venv\Scripts\python.exe scripts/verify_local_detection.py
+.\.venv\Scripts\python.exe scripts/verify_region_repair.py
 ```
 
 CI：`.github/workflows/tests.yml` 运行非 WebEngine 测试、`node --check` 与 `compileall`。

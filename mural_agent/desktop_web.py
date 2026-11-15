@@ -117,6 +117,10 @@ class Bridge(QObject):
         folder = self.store.folder(record['id'])
         result['file_url'] = self._file_url(folder / 'result.png')
         result['difference_url'] = self._file_url(folder / 'difference.png')
+        if (folder / 'region.png').is_file():
+            result['region_url'] = self._file_url(folder / 'region.png')
+        if (folder / 'region_difference.png').is_file():
+            result['region_difference_url'] = self._file_url(folder / 'region_difference.png')
         return result
 
     def _save_proposal(self, image_id, mask, metadata):
@@ -515,6 +519,7 @@ class Bridge(QObject):
                 'repair_allowed': True, 'risk_notice': metadata['risk_notice'], 'confirmed': True,
                 'mask_status': 'manual', 'mask_notice': '人工框选的掩膜，需复核。',
                 'model_source': 'manual',
+                'mask_file_url': self._file_url(folder / 'mask.png'),
                 'mask_overlay_data': self._mask_overlay(array),
             }
             return {'proposal': proposal, 'defect': defect}
@@ -913,6 +918,30 @@ class Bridge(QObject):
             proposal = self.store.update('proposal', proposal_id, metadata=metadata, confirmed=True,
                                          fraction=fraction, mask_source=mask_source)
             return {'defect': self._local_defect(proposal)}
+        return self._result(action)
+
+    @Slot(str, result=str)
+    def generateRegionRepairs(self, request_json):
+        """Stage 4: create one LaMa/OpenCV candidate per confirmed defect mask."""
+        def action():
+            request = json.loads(request_json)
+            if self.aux_future and not self.aux_future.done():
+                raise ValueError('AI 分析仍在运行，请完成后再生成修复候选。')
+            image = self.store.get('image', request.get('image_id'))
+            if not image:
+                raise ValueError('图像记录不存在。')
+            active = [job for job in self.store.list('job')
+                      if job.get('image_id') == image['id']
+                      and job.get('status') in {'queued', 'planning', 'running', 'evaluating'}]
+            if active:
+                raise ValueError('该图像已有修复任务在运行，请完成后再生成新的候选。')
+            from .region_repair import run_region_candidates
+            result = run_region_candidates(
+                self.store, self.engine, image, request.get('proposal_ids') or [],
+                instructions=str(request.get('instructions') or '')[:2000])
+            self.current_image_id = image['id']
+            result['jobs'] = [self._job(job) for job in result['jobs']]
+            return result
         return self._result(action)
 
     @Slot(str, result=str)

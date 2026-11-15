@@ -813,3 +813,53 @@ def test_defect_launch_selects_task_and_exposes_batch_results(window, qt_app, mo
         assert wait_until(qt_app, lambda: run_js(window, "document.querySelector('#batch-summary').textContent") == '本批次 2 项 · 2 项已结束')
         run_js(window, f'document.querySelector(\'[data-batch-job="{first}"]\').click(); true')
         assert wait_until(qt_app, lambda: run_js(window, 'window.__shibui.state.candidate?.id || null') == candidate['id'])
+
+
+def test_region_repair_candidates_and_region_preview(window, qt_app):
+    """Stage 4: confirmed defect mask -> one local candidate with region crops."""
+    image = load_plain_fixture(window, qt_app)
+    made = json.loads(window.bridge.addManualDefect(image['id'], json.dumps({
+        'bbox': [300, 250, 700, 750], 'type': 'paint_loss', 'size': 'medium'})))
+    defect = made['defect']
+    assert run_js(window, f"window.__shibui.state.damageItems = {json.dumps([defect])};"
+                          " window.__shibui.renderDamage(); true") is True
+    assert run_js(window, "document.querySelectorAll('[data-repair-defect]').length") == 1
+    assert run_js(window, "Boolean(document.querySelector('[data-action=\"generate-region-repairs\"]'))") is True
+
+    result = json.loads(window.bridge.generateRegionRepairs(json.dumps({
+        'image_id': image['id'], 'proposal_ids': [defect['proposal_id']]})))
+    assert 'error' not in result, result
+    assert result['skipped'] == []
+    job = result['jobs'][0]
+    assert job['region_repair'] is True
+    assert job['region_backend'] == 'telea'      # LaMa weights are absent in this fixture
+    assert job['region_preferred'] == 'lama'
+    assert job['defect_bbox'] == [96, 60, 224, 180]
+
+    def finished():
+        snapshot = json.loads(window.bridge.snapshot())
+        record = next((item for item in snapshot['jobs'] if item['id'] == job['id']), None)
+        return record is not None and record['status'] not in ACTIVE
+
+    assert wait_until(qt_app, finished, 60)
+    record = next(item for item in json.loads(window.bridge.snapshot())['jobs'] if item['id'] == job['id'])
+    assert record['status'] == 'review', record.get('error')
+    assert record['checks']['original_unchanged'] is True
+    assert record['checks']['outside_unchanged'] is True
+    candidate = record['candidates'][0]
+    assert candidate['region_url'] and candidate['region_difference_url']
+    assert candidate['checks']['size_match'] is True
+    assert candidate['region']['box'] == [88, 52, 232, 188]
+    assert (window.store.folder(candidate['id']) / 'region.png').is_file()
+    assert (window.store.folder(candidate['id']) / 'region_difference.png').is_file()
+
+    # The shipped results view shows the region crop and offers a re-run.
+    probe = run_js(window, """(() => { try {
+      window.__shibui.state.job = %s; window.__shibui.state.candidate = null;
+      window.__shibui.renderJob(window.__shibui.state.job); return 'ok';
+    } catch (error) { return String(error && error.stack || error); } })()""" % json.dumps(record))
+    assert probe == 'ok', probe
+    assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('#region-panel').classList.contains('hidden')") is True, 10)
+    assert wait_until(qt_app, lambda: run_js(window, "(document.querySelector('#region-images img')?.naturalWidth || 0) > 0") is True, 10)
+    assert run_js(window, "document.querySelector('[data-action=\"regenerate-region\"]').disabled") is False
+    assert '重新生成此区域' in run_js(window, "document.querySelector('#region-panel').textContent")
