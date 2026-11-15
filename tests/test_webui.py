@@ -987,3 +987,38 @@ def test_rect_tool_default_red_selection_and_one_click_confirm(window, qt_app):
     assert wait_until(qt_app, lambda: run_js(window, "Boolean(window.__shibui.state.damageItems[0]?.mask_file_url)") is True, 15)
     assert wait_until(qt_app, lambda: run_js(window, 'window.__shibui.state.damageItems[0].identification_status') == 'confirmed', 10)
     assert (window.store.folder(pending_id) / 'mask.png').is_file()
+
+
+def test_ai_box_direct_accept_and_combined_final_image(window, qt_app):
+    """An AI box without a local region can be accepted in one click, then merged into a final image."""
+    image = load_plain_fixture(window, qt_app)
+    ai_item = {'index': 0, 'type': 'paint_loss', 'bbox': [300, 250, 700, 750], 'size': 'medium',
+               'confidence': 0.9, 'evidence': 'AI 标出的颜料缺失区域', 'requires_manual_selection': True,
+               'model_source': 'deepseek-flash', 'confirmed': False}
+    assert run_js(window, f"window.__shibui.state.damageItems = {json.dumps([ai_item])};"
+                          " window.__shibui.renderDamage(); true") is True
+    assert run_js(window, "document.querySelectorAll('[data-accept-region]').length") == 1
+    assert run_js(window, "document.querySelector('[data-accept-region=\"0\"]').click(); true") is True
+    assert wait_until(qt_app, lambda: run_js(window, "Boolean(window.__shibui.state.damageItems[0]?.proposal_id"
+                                                      " && window.__shibui.state.damageItems[0]?.mask_file_url)") is True, 15)
+    proposal_id = run_js(window, "window.__shibui.state.damageItems[0].proposal_id")
+    assert (window.store.folder(proposal_id) / 'mask.png').is_file()
+    assert run_js(window, "document.querySelectorAll('[data-repair-defect]').length") == 1
+
+    generated = json.loads(window.bridge.generateRegionRepairs(json.dumps({
+        'image_id': image['id'], 'proposal_ids': [proposal_id]})))
+    job_id = generated['jobs'][0]['id']
+
+    def finished():
+        jobs = json.loads(window.bridge.snapshot())['jobs']
+        record = next((item for item in jobs if item['id'] == job_id), None)
+        return record is not None and record['status'] not in ACTIVE
+
+    assert wait_until(qt_app, finished, 60)
+    assert run_js(window, "document.querySelector('[data-action=\"compose-final\"]').click(); true") is True
+    assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('#final-panel').classList.contains('hidden')") is True, 15)
+    assert wait_until(qt_app, lambda: (run_js(window, "(document.querySelector('#final-images img')?.naturalWidth || 0)") or 0) > 0, 15)
+    meta = run_js(window, "document.querySelector('#final-meta').textContent")
+    assert '1 个区域已合并' in meta and '尺寸检查通过' in meta
+    assert run_js(window, "document.querySelector('[data-action=\"save-final\"]').disabled") is False
+    assert (window.store.folder(image['id']) / 'final-repair.png').is_file()
