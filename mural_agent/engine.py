@@ -76,6 +76,22 @@ class Engine:
             raise ValueError('冻结输入 hash 不一致，拒绝续跑或执行。')
         return image_array(image_path), mask_array(mask_path)
 
+    @staticmethod
+    def region_box(bbox, image):
+        """Clamp a defect crop box with a little context; None when unusable."""
+        try:
+            x0, y0, x1, y1 = [int(value) for value in (bbox or [])]
+        except (TypeError, ValueError):
+            return None
+        width, height = int(image['width']), int(image['height'])
+        if x1 <= x0 or y1 <= y0:
+            return None
+        pad = max(8, round(max(x1 - x0, y1 - y0) * .05))
+        box = [max(0, x0 - pad), max(0, y0 - pad), min(width, x1 + pad), min(height, y1 + pad)]
+        if box[2] - box[0] < 8 or box[3] - box[1] < 8:
+            return None
+        return box
+
     def make_plan(self, job, original, mask):
         fraction = float((mask > 0).mean())
         if job.get('planner') == 'auto':
@@ -278,13 +294,31 @@ class Engine:
                         raise RuntimeError('候选未通过掩膜外一致性检查。')
                     folder = self.store.folder(identifier)
                     Image.fromarray(output).save(folder/'result.png')
-                    Image.fromarray(make_difference(original, output)).save(folder/'difference.png')
+                    difference = make_difference(original, output)
+                    Image.fromarray(difference).save(folder/'difference.png')
+                    region_meta = None
+                    box = self.region_box(job.get('defect_bbox'), image)
+                    if box is not None:
+                        x0, y0, x1, y1 = box
+                        Image.fromarray(output[y0:y1, x0:x1]).save(folder/'region.png')
+                        Image.fromarray(difference[y0:y1, x0:x1]).save(folder/'region_difference.png')
+                        region_meta = {'box': box, 'width': x1-x0, 'height': y1-y0,
+                                       'url': f'/api/assets/{identifier}/region.png',
+                                       'difference_url': f'/api/assets/{identifier}/region_difference.png'}
+                    checks = {
+                        'output_size': [int(output.shape[1]), int(output.shape[0])],
+                        'size_match': output.shape[:2] == (int(image['height']), int(image['width'])),
+                        'outside_unchanged': bool(metrics['outside_unchanged']),
+                        'outside_max_difference': int(metrics.get('outside_max_difference', 0)),
+                        'masked_fraction': metrics.get('masked_fraction'),
+                    }
                     candidate = {'id': identifier, 'job_id': job_id, 'image_id': image['id'], 'mask_id': mask_record['id'],
                         'tool': step.tool, 'radius': step.radius, 'parameters': step.model_dump(),
                         'parent_version': image['id'],
                            'speculative': job.get('mode') == 'speculative',
                            'enhanced': job.get('mode') == 'enhanced',
-                        'metrics': metrics, 'elapsed_seconds': round(time.monotonic()-started, 2), 'versions': versions,
+                        'metrics': metrics, 'checks': checks, 'region': region_meta,
+                        'elapsed_seconds': round(time.monotonic()-started, 2), 'versions': versions,
                         'created_at': timestamp(), 'raw_sha256': sha256(folder/'raw.png'), 'result_sha256': sha256(folder/'result.png'),
                         'url': f'/api/assets/{identifier}/result.png', 'difference_url': f'/api/assets/{identifier}/difference.png'}
                     self.store.put('candidate', candidate)
@@ -315,13 +349,25 @@ class Engine:
                         next_step=next_step, elapsed_seconds=previous_elapsed+time.monotonic()-session_start,
                         progress=18+round(len(candidates)/budget.candidates*75))
             self.check_cancel(job_id)
+            # The working image is immutable; record that no tool wrote to it and
+            # aggregate the per-candidate output checks on the job itself.
+            original_unchanged = sha256(self.store.folder(image['id']) / 'image.png') == image['working_sha256']
+            checks = {
+                'original_unchanged': bool(original_unchanged),
+                'output_size': [int(image['width']), int(image['height'])],
+                'size_match': all(item.get('checks', {}).get('size_match', True) for item in candidates),
+                'outside_unchanged': all(item.get('checks', {}).get('outside_unchanged', True) for item in candidates),
+                'candidates_checked': len(candidates),
+            }
             if not candidates:
-                self.store.update('job', job_id, status='failed', error='预算内未产生候选，请检查模型、参考资料或输入。', exit_reason=exit_reason)
+                self.store.update('job', job_id, status='failed', checks=checks,
+                                  error='预算内未产生候选，请检查模型、参考资料或输入。', exit_reason=exit_reason)
                 return
             passed = [c for c in candidates if c['metrics'].get('passed', False)]
             recommended = min(passed or candidates, key=lambda c: c['metrics'].get('score', c['metrics']['boundary_color_gap']))['id']
             self.store.update('job', job_id, status='review', progress=100, recommended_id=recommended,
-                exit_reason=exit_reason, quality_outcome='checks_passed' if passed else 'needs_human_review')
+                exit_reason=exit_reason, checks=checks,
+                quality_outcome='checks_passed' if passed else 'needs_human_review')
             self.store.event(job_id, '已完成有限预算闭环；保留全部候选与失败轨迹，等待人工复核。')
         except Cancelled:
             self.store.update('job', job_id, status='cancelled')

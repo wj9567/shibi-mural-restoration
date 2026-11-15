@@ -157,6 +157,16 @@ textarea { resize: vertical; min-height: 66px; line-height: 1.5; }
 .candidate-card { width: 118px; flex: 0 0 118px; border: 1px solid #e4e7eb; border-radius: 5px; padding: 4px; text-align: left; background: #fff; color: #626b75; font-size: 9px; }
 .candidate-card.active { border-color: #8998aa; box-shadow: 0 0 0 1px #8998aa; }
 .candidate-card img { width: 100%; height: 62px; object-fit: contain; background: #f7f8fa; margin-bottom: 3px; }
+.region-panel { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; background: #fbfcfd; }
+.region-panel.hidden { display: none; }
+.region-heading { display: flex; align-items: center; gap: 8px; }
+.region-heading strong { font-size: 12px; }
+.region-heading .field-note { flex: 1 1 auto; font-size: 10px; }
+.region-heading .button { font-size: 10px; padding: 3px 8px; }
+.region-images { display: flex; gap: 10px; margin-top: 6px; }
+.region-images figure { margin: 0; display: flex; flex-direction: column; gap: 3px; }
+.region-images img { max-height: 120px; max-width: 280px; border: 1px solid #e4e7eb; border-radius: 4px; background: #f7f8fa; object-fit: contain; }
+.region-images figcaption { font-size: 10px; color: var(--muted); }
 .comparison-toolbar { display: flex; align-items: center; gap: 8px; color: #858d96; font-size: 9px; }
 .comparison-toolbar select { width: 106px; padding: 5px 6px; }
 .comparison-toolbar input[type="range"] { flex: 1; min-width: 50px; }

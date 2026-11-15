@@ -632,6 +632,28 @@
       if (job.selected_id === state.candidate?.id && job.review?.note && !$('#review-note').value) $('#review-note').value = job.review.note;
     }));
     renderComparison();
+    renderRegionPanel(job);
+  }
+
+  function renderRegionPanel(job = state.job) {
+    const panel = $('#region-panel');
+    if (!panel) return;
+    const candidate = state.candidate;
+    const region = candidate?.region;
+    if (!candidate?.region_url || !region) {
+      panel.classList.add('hidden');
+      $('#region-images').innerHTML = '';
+      return;
+    }
+    const index = (job?.candidates || []).indexOf(candidate) + 1;
+    panel.classList.remove('hidden');
+    $('#region-meta').textContent = `候选 ${index} · 区域 ${region.width}×${region.height}px · ${candidate.tool}`;
+    const stamp = Date.now();
+    $('#region-images').innerHTML =
+      `<figure><img src="${fileUrl(candidate.region_url)}?v=${stamp}" alt="区域修复结果"><figcaption>区域修复</figcaption></figure>` +
+      (candidate.region_difference_url
+        ? `<figure><img src="${fileUrl(candidate.region_difference_url)}?v=${stamp}" alt="区域差异"><figcaption>区域差异</figcaption></figure>` : '');
+    $('[data-action="regenerate-region"]').disabled = ACTIVE.includes(job?.status);
   }
 
   function applySwipe() {
@@ -1047,6 +1069,8 @@
       const removeButton = item.proposal_id
         ? `<button class="icon-button" data-remove-defect="${index}" ${disabled ? 'disabled' : ''} title="删除此项">删除</button>` : '';
       const maskButton = `<button class="icon-button" data-edit-mask="${index}" ${disabled ? 'disabled' : ''}>${item.mask_file_url ? '修改掩膜' : '绘制掩膜'}</button>`;
+      const repairButton = item.proposal_id && item.mask_file_url && confirmed
+        ? `<button class="button" data-repair-defect="${index}" ${disabled ? 'disabled' : ''}>生成修复候选</button>` : '';
       // Only a persisted, unconfirmed proposal blocks running; a bare model box
       // still runs through the existing manual-selection path.
       const canRun = !item.proposal_id || confirmed;
@@ -1061,7 +1085,7 @@
         `<option value="color" ${selectedMethod === 'color' ? 'selected' : ''}>局部色调匹配</option></select></label>` +
         `${maskText ? `<small>${escapeHtml(maskText)}${confirmed ? ' · <span class="damage-confirmed">已确认</span>' : ''}</small>` : ''}` +
         `${hint ? `<small>${escapeHtml(hint)}</small>` : ''}${statusText ? `<small>${statusText}</small>` : ''}</div>` +
-        `<div class="damage-item-actions">${confirmButton}${maskButton}${removeButton}${pending
+        `<div class="damage-item-actions">${confirmButton}${maskButton}${removeButton}${repairButton}${pending
           ? `<button class="button" data-draw-defect="${index}" ${disabled ? 'disabled' : ''}>手动框选此候选</button>`
           : `<button class="button" data-run-defect="${index}" ${disabled || !canRun ? 'disabled' : ''}>运行修复</button>`}</div></div>`;
     }).join('');
@@ -1074,6 +1098,10 @@
     $$('[data-confirm-defect]').forEach(button => button.addEventListener('click', () => confirmLocalDefect(Number(button.dataset.confirmDefect)).catch(notifyError)));
     $$('[data-remove-defect]').forEach(button => button.addEventListener('click', () => removeLocalDefect(Number(button.dataset.removeDefect)).catch(notifyError)));
     $$('[data-edit-mask]').forEach(button => button.addEventListener('click', () => beginMaskEdit(state.damageItems[Number(button.dataset.editMask)]).catch(notifyError)));
+    $$('[data-repair-defect]').forEach(button => button.addEventListener('click', () => {
+      const item = state.damageItems[Number(button.dataset.repairDefect)];
+      generateRegionRepairs([item?.proposal_id]).catch(notifyError);
+    }));
     const generativeToggle = $('#damage-generative');
     if (generativeToggle) generativeToggle.onchange = () => renderDamage();
     const first = state.damageItems[0];
@@ -1140,6 +1168,38 @@
     Object.assign(item, defect);
     renderDamage();
     toast('已保存人工修正的掩膜；请复核后再运行修复。');
+  }
+
+  async function generateRegionRepairs(proposalIds) {
+    if (!state.image) return toast('请先打开一幅壁画。');
+    if (state.running || state.autoBusy) return toast('请等待当前分析或修复任务完成。');
+    const ids = [...new Set((proposalIds || []).filter(Boolean))];
+    if (!ids.length) return toast('请先确认缺损项并准备好掩膜，再生成修复候选。');
+    setBusy(true);
+    try {
+      const result = await invoke('generateRegionRepairs', JSON.stringify({
+        image_id: state.image.id, proposal_ids: ids,
+      }));
+      const jobs = result.jobs || [];
+      if (!jobs.length) {
+        toast(result.skipped?.[0]?.reason || '没有可生成修复候选的缺损项。');
+        return;
+      }
+      hideModal('damage-modal');
+      state.batchJobIds = jobs.map(job => job.id);
+      state.job = jobs[0]; state.candidate = null;
+      state.activeJobId = jobs.find(job => ACTIVE.includes(job.status))?.id || null;
+      $('#review-note').value = '';
+      $('#archive-hypothesis').checked = false;
+      $$('input[name="review-decision"]').forEach(input => { input.checked = false; });
+      showPage('workbench'); showView('results');
+      renderJob(state.job); renderBatchJobs(jobs);
+      const skipped = result.skipped?.length ? `；跳过 ${result.skipped.length} 项：${result.skipped[0].reason}` : '';
+      toast(`已启动 ${jobs.length} 个区域修复候选${skipped}。`);
+    } finally {
+      setBusy(false);
+      await refresh();
+    }
   }
 
   async function runDefectRepairs(indexes) {
@@ -1414,6 +1474,18 @@
           break;
         }
         case 'run-all-defects': await runDefectRepairs(state.damageItems.map((_, index) => index)); break;
+        case 'generate-region-repairs': {
+          const ids = state.damageItems
+            .filter(item => item.proposal_id && item.mask_file_url && item.confirmed !== false)
+            .map(item => item.proposal_id);
+          await generateRegionRepairs(ids);
+          break;
+        }
+        case 'regenerate-region': {
+          if (!state.job?.defect_proposal_id) return toast('当前任务不是区域修复任务，无法按区域重新生成。');
+          await generateRegionRepairs([state.job.defect_proposal_id]);
+          break;
+        }
         case 'cancel-job': { const identifier = state.activeJobId || state.job?.id; if (identifier) { await invoke('cancelJob', identifier); } await refresh(); break; }
         case 'resume-job': if (state.job) await invoke('resumeJob', state.job.id); await refresh(); break;
         case 'select-candidate': {
@@ -1682,5 +1754,5 @@
   // Test seam: the acceptance tests drive the same mask round-trip and job flow
   // through the shipped frontend instead of duplicating the logic in Python.
   window.__shibui = { state, loadImage, installMask, showMaskFromBase64, exportMaskBase64, refresh, renderDamage,
-    renderComparison, layoutComparison };
+    renderJob, renderRegionPanel, renderComparison, layoutComparison };
 })();
