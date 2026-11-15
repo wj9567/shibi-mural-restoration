@@ -43,11 +43,11 @@
             <div id="edit-view" class="view-panel active">
               <div class="canvas-toolbar">
                 <div class="tool-group"><button class="tool-button active" data-tool="brush" title="可修露底（琥珀）">可修露底</button><button class="tool-button" data-tool="uncertain" title="不确定（红）">不确定</button><button class="tool-button" data-tool="unrestorable" title="不可复原（红斜线）">不可复原</button><button class="tool-button" data-tool="eraser" title="橡皮">橡皮</button><span class="toolbar-divider"></span><label class="range-label">笔径 <input id="brush-size" type="range" min="4" max="120" value="28"><output id="brush-value">28</output></label></div>
-                <div class="tool-group"><button class="icon-button" data-action="undo" title="撤销">撤销</button><button class="icon-button" data-action="clear-mask" title="清空掩膜">清空</button><button class="icon-button" data-action="import-mask" title="导入掩膜">导入掩膜</button><span class="toolbar-divider"></span><button class="icon-button" data-action="zoom-out" title="缩小">−</button><button class="icon-button" data-action="zoom-fit" title="适应窗口">适应</button><button class="icon-button" data-action="zoom-in" title="放大">+</button></div>
+                <div class="tool-group"><button class="icon-button" data-action="undo" title="撤销">撤销</button><button class="icon-button" data-action="clear-mask" title="清空掩膜">清空</button><button class="icon-button" data-action="import-mask" title="导入掩膜">导入掩膜</button><button class="icon-button" data-action="save-defect-mask" title="把当前画笔掩膜保存到缺损清单中选中的项">保存缺损掩膜</button><span class="toolbar-divider"></span><button class="icon-button" data-action="zoom-out" title="缩小">−</button><button class="icon-button" data-action="zoom-fit" title="适应窗口">适应</button><button class="icon-button" data-action="zoom-in" title="放大">+</button></div>
               </div>
               <div id="image-stage" class="image-stage">
                 <div id="empty-state" class="empty-state"><div class="empty-icon"><span></span></div><strong>把一幅壁画带入工作台</strong><p>原图会单独保存，修复只作用于你圈选的区域。</p><button class="button primary" data-action="open-image">选择图像</button></div>
-                <div id="canvas-wrap" class="canvas-wrap hidden"><img id="source-image" draggable="false"><canvas id="mask-canvas"></canvas><canvas id="region-canvas" class="region-canvas"></canvas><div id="damage-highlight" class="damage-highlight"></div></div>
+                <div id="canvas-wrap" class="canvas-wrap hidden"><img id="source-image" draggable="false"><canvas id="mask-canvas"></canvas><canvas id="region-canvas" class="region-canvas"></canvas><div id="damage-overlay" class="damage-overlay hidden"></div><div id="damage-highlight" class="damage-highlight"></div></div>
               </div>
               <div class="canvas-footer"><span id="mask-status">琥珀=可修露底 · 红=不确定 · 深红斜线=不可复原</span><span>Ctrl + 滚轮缩放 · B 画笔 · E 橡皮</span></div>
             </div>
@@ -72,8 +72,8 @@
           <aside class="inspector">
             <div class="inspector-section"><div class="section-title"><span>AI 修复助手</span><span id="mask-fraction" class="muted"></span></div>
               <label class="field-label" for="vision-provider">分析来源</label>
-              <select id="vision-provider" aria-describedby="vision-provider-note"><option value="deepseek" selected>DeepSeek 云端</option><option value="local">本地模型（Qwen3-VL）</option></select>
-              <small id="vision-provider-note" class="field-note">点击分析会向 DeepSeek 发送当前图像的缩小副本。</small>
+              <select id="vision-provider" aria-describedby="vision-provider-note"><option value="local" selected>本地模型（Qwen3-VL）</option><option value="deepseek">DeepSeek 云端</option></select>
+              <small id="vision-provider-note" class="field-note">使用本机 Qwen3-VL 识别病害；SAM 2.1 生成掩膜候选。</small>
               <button class="button primary ai-start-button" data-action="auto-restore" id="auto-button" aria-describedby="vision-provider-note" disabled>AI 分析缺损与文化线索</button>
               <small id="auto-status" class="field-note" role="status">分析结果须人工核对。</small>
               <section id="culture-summary" class="culture-summary hidden" aria-live="polite"></section>

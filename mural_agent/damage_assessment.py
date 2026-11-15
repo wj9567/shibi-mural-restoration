@@ -8,7 +8,7 @@ import time
 from PIL import Image
 
 
-TYPES = {"crack", "paint_loss", "plaster_loss", "flaking", "stain", "other"}
+TYPES = {"crack", "paint_loss", "plaster_loss", "flaking", "fading", "stain", "other"}
 SIZES = {"small", "medium", "large", "uncertain"}
 
 # Conservative routing suggestion, not a conservation decision. Mirrors the
@@ -17,7 +17,9 @@ SIZES = {"small", "medium", "large", "uncertain"}
 def recommendation_for(item):
     kind = item.get("type", "other")
     size = item.get("size", "uncertain")
-    if kind == "stain":
+    if kind in {"stain", "fading"}:
+        # Fading and staining are surface observations; do not default to LaMa
+        # hole filling, which would inpaint away intact pigment.
         return {"backend": "color", "tool": "color", "method": "局部色调匹配"}
     if kind == "crack":
         if size == "large":
@@ -96,7 +98,37 @@ def merge_adjacent_candidates(items, gap=10):
     return merged
 
 
-def parse_model_output(text):
+def _percent_items(items):
+    """Treat all-percent boxes (0..100) as 0..1000 normalized coordinates.
+
+    The pinned 2B Qwen model answers with percentages even when asked for 0..1000
+    values, so the caller opts into unit detection instead of silently placing a
+    whole-picture box in the top-left tenth of the image.
+    """
+    boxes = []
+    for source in items:
+        if not isinstance(source, dict) or source.get('type') not in TYPES:
+            continue
+        try:
+            boxes.append([int(value) for value in source['bbox']])
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not boxes or any(len(box) != 4 for box in boxes):
+        return items
+    if max(max(box) for box in boxes) > 105:
+        return items
+    scaled = []
+    for source in items:
+        if isinstance(source, dict) and isinstance(source.get('bbox'), list) and len(source['bbox']) == 4:
+            try:
+                source = {**source, 'bbox': [max(0, min(1000, int(value) * 10)) for value in source['bbox']]}
+            except (TypeError, ValueError):
+                pass
+        scaled.append(source)
+    return scaled
+
+
+def parse_model_output(text, bbox_units='normalized'):
     start = text.find("{")
     if start < 0:
         raise ValueError("视觉模型没有返回 JSON 对象。")
@@ -104,9 +136,12 @@ def parse_model_output(text):
     try:
         data, _ = decoder.raw_decode(text[start:])
         if isinstance(data, dict):
+            items = data.get('items', [])
+            if bbox_units == 'auto':
+                items = _percent_items(items)
             # Merge duplicates before capping: a VLM may repeat the same candidate
             # several times and fill the eight slots with duplicates.
-            data["items"] = merge_adjacent_candidates(data.get("items", []))[:8]
+            data["items"] = merge_adjacent_candidates(items)[:8]
             return data
     except json.JSONDecodeError:
         pass
@@ -132,6 +167,8 @@ def parse_model_output(text):
         offset += consumed
     if not items:
         raise ValueError("视觉模型输出被截断，未得到完整缺损候选。")
+    if bbox_units == 'auto':
+        items = _percent_items(items)
     return {"items": merge_adjacent_candidates(items)[:8],
             "limitations": "模型输出被截断；仅保留已完整解析的候选，需人工检查。"}
 
@@ -158,7 +195,9 @@ def assess_image(engine, image_record):
             "Do not label intentional painted outlines, figures, ornament, pigment boundaries, "
             "or the normal edge of a detached fragment as cracks. Report distinct visible candidates "
             "such as cracks, paint loss, plaster loss, flaking, or stains. Use a tight bounding box "
-            "for each candidate, normalized to integers from 0 to 1000 in [x0,y0,x1,y1] order. "
+            "for each candidate as integer PERCENTAGES of the image width and height in [x0,y0,x1,y1] "
+            "order: [0,0,100,100] is the whole picture and [10,10,100,100] starts near the left/top "
+            "edge and ends at the right/bottom edge. "
             "Estimate size as small, medium, large, or uncertain based on the visible affected region; "
             "estimate visual confidence from 0.0 to 1.0 and give one short visual evidence sentence. "
             "This is only a visual proposal, not a conservation diagnosis. It is acceptable to return "
@@ -172,7 +211,7 @@ def assess_image(engine, image_record):
             "that must not be erased or reconstructed without references. "
             "Return only JSON exactly shaped as: "
             '{"items":[{"type":"crack|paint_loss|plaster_loss|flaking|stain|other",'
-            '"bbox":[0,0,10,10],"size":"small|medium|large|uncertain",'
+            '"bbox":[10,10,60,60],"size":"small|medium|large|uncertain",'
             '"confidence":0.0,"evidence":"..."}],'
             '"cultural_context":{"visible_subject":"...","possible_period_or_tradition":"...",'
             '"confidence":"low|medium|high","visual_clues":["..."],'
@@ -202,7 +241,9 @@ def assess_image(engine, image_record):
     if process.returncode:
         raise RuntimeError("本地视觉模型缺损识别失败；诊断信息保存在工作区记录中。")
     text = output_path.read_text(encoding="utf-8")
-    data = parse_model_output(text)
+    # The pinned 2B model answers in percentages; auto-detection keeps a
+    # 0..1000 answer working too.
+    data = parse_model_output(text, bbox_units='auto')
     items = []
     for index, candidate in enumerate(data.get("items", [])[:8]):
         try:

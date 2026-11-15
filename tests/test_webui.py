@@ -163,6 +163,7 @@ def test_deepseek_key_can_be_saved_independently_from_settings_dialog(window, qt
     run_js(window, "document.querySelector('#settings-modal [data-action=\"close-settings\"]').click(); true")
     run_js(window, "document.querySelector('[data-action=\"load-demo\"]').click(); true")
     assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('#auto-button').disabled"), 20)
+    select_deepseek(window)
     run_js(window, "document.querySelector('#auto-button').click(); true")
     assert wait_until(qt_app, lambda: run_js(window, "document.querySelector('#auto-status').textContent.includes('未发现')"), 20)
     assert calls == [key]
@@ -275,32 +276,33 @@ def test_auto_restore_creates_a_traceable_autonomous_job(window, qt_app, monkeyp
 
 
 def test_auto_analyze_button_shows_defect_list_without_submitting(window, qt_app, monkeypatch):
-    """The AI button now analyzes and lists defects; it must not auto-create a job."""
-    import mural_agent.auto_restore as auto_module
+    """The default workbench runs local analysis and layers SAM only on geometry."""
+    from mural_agent import desktop_web, vision_analysis
 
-    monkeypatch.setattr(auto_module, 'assess_image', lambda engine, record: {
+    monkeypatch.setattr(desktop_web, 'local_model_setup', lambda *args: {
+        'qwen_ready': True, 'sam_ready': True, 'qwen_hint': '', 'sam_hint': '',
+    })
+    monkeypatch.setattr(vision_analysis, 'assess_image', lambda engine, record: {
         'items': [{'index': 1, 'type': 'paint_loss', 'bbox': [400, 300, 560, 380],
-                   'size': 'medium', 'confidence': 0.9, 'evidence': 'fake'}],
+                   'size': 'medium', 'confidence': 0.9, 'evidence': '局部颜料层中断'},
+                  {'index': 2, 'type': 'fading', 'bbox': [660, 500, 850, 700],
+                   'size': 'medium', 'confidence': 0.8, 'evidence': '同一色块明显变浅'}],
         'limitations': 'fake'})
+    monkeypatch.setattr(window.engine.sam, 'available', lambda: True)
+    sam_calls = []
+    automatic = np.zeros((640, 960), dtype=np.uint8)
+    automatic[208:231, 400:520] = 255
 
-    def fake_refine(engine, image, item):
-        mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        height, width = mask.shape
-        mask[round(300 * height / 1000):round(380 * height / 1000),
-             round(400 * width / 1000):round(560 * width / 1000)] = 255
-        return mask, {'method': 'fake'}
+    def predict(image, *, box):
+        sam_calls.append((image.shape, list(box)))
+        return automatic, {'predicted_iou': .95}
 
-    monkeypatch.setattr(auto_module, 'refine_item', fake_refine)
-    vision = window.store.root / 'fake-vision'
-    vision.mkdir(exist_ok=True)
-    (vision / 'provenance.json').write_text('{}', encoding='utf-8')
-    window.bridge.settings.vision_model = vision
+    monkeypatch.setattr(window.engine.sam, 'predict', predict)
 
     assert run_js(window, "document.querySelector('[data-action=\"load-demo\"]').click(); true") is True
     assert wait_until(qt_app, lambda: run_js(window, 'Boolean(window.__shibui.state.image)') is True, 30)
     assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('[data-action=\"auto-restore\"]').disabled") is True, 15)
-    assert run_js(window, "document.querySelector('#vision-provider').value") == 'deepseek'
-    assert run_js(window, "document.querySelector('#vision-provider').value = 'local'; true") is True
+    assert run_js(window, "document.querySelector('#vision-provider').value") == 'local'
     assert run_js(window, "document.querySelector('[data-action=\"auto-restore\"]').click(); true") is True
     assert wait_until(qt_app, lambda: json.loads(window.bridge.snapshot())['aux'].get('status') in {'done', 'error'}, 30)
     aux = json.loads(window.bridge.snapshot())['aux']
@@ -308,10 +310,61 @@ def test_auto_analyze_button_shows_defect_list_without_submitting(window, qt_app
     auto = aux['result']['auto']
     assert auto['job'] is None, 'analysis must not enqueue a repair job'
     assert auto.get('awaiting_confirmation') is True
-    assert auto['defects']
-    assert wait_until(qt_app, lambda: run_js(window, "document.querySelectorAll('.damage-item').length") >= 1, 20)
+    repairable, observation = auto['defects']
+    assert sam_calls == [((640, 960, 3), [384, 192, 538, 244])]
+    assert repairable['mask_status'] == 'sam' and not repairable['confirmed']
+    assert observation['mask_status'] == 'observation' and not observation.get('mask_file_url')
+    assert auto['assessment']['items'][0]['bbox'] == [384, 192, 538, 244]
+    assert wait_until(qt_app, lambda: run_js(window, "document.querySelectorAll('.damage-item').length") == 2, 20)
+    assert wait_until(qt_app, lambda: run_js(window, "document.querySelectorAll('#damage-overlay .damage-region[data-region-index]').length") == 2, 10)
+    labels = run_js(window, "document.querySelector('#damage-overlay').textContent")
+    assert all(label in labels for label in ('1', '2', '褪色', 'Qwen3-VL'))
+    assert run_js(window, """(() => {
+      const box = document.querySelector('#damage-overlay .damage-region[data-region-index="0"]');
+      return Math.abs(parseFloat(box.style.left) - 40) < 0.2 && Math.abs(parseFloat(box.style.top) - 30) < 0.2;
+    })()""") is True
+    assert wait_until(qt_app, lambda: run_js(window, """(() => {
+      const mask = document.querySelector('#damage-overlay canvas.damage-mask-overlay');
+      if (!mask || mask.width !== 960 || mask.height !== 640) return false;
+      const ctx = mask.getContext('2d');
+      return ctx.getImageData(430, 215, 1, 1).data[3] > 0 && ctx.getImageData(430, 200, 1, 1).data[3] === 0;
+    })()"""), 10)
     assert run_js(window, "document.querySelector('#results-view').classList.contains('active')") is False
     assert json.loads(window.bridge.snapshot())['jobs'] == []
+
+    image_id = aux['image_id']
+    rejected = json.loads(window.bridge.runDefectRepairs(json.dumps({
+        'image_id': image_id, 'proposal_ids': [repairable['proposal_id'], observation['proposal_id']],
+    })))
+    assert not rejected.get('jobs') and not window.store.list('job')
+
+    assert run_js(window, "document.querySelector('[data-confirm-defect=\"0\"]').click(); true") is True
+    assert wait_until(qt_app, lambda: run_js(window, 'window.__shibui.state.damageItems[0].confirmed'), 10)
+
+    def edit(**args):
+        return json.loads(window.bridge.editLocalDefect(image_id, json.dumps(args)))
+
+    wrong_size = base64.b64encode(png(np.ones((36, 28), dtype=np.uint8) * 255)).decode()
+    assert 'error' in edit(action='update', proposal_id=repairable['proposal_id'], mask_data=wrong_size)
+    edited_mask = np.zeros_like(automatic)
+    edited_mask[216:239, 432:513] = 255
+    encoded = base64.b64encode(png(edited_mask)).decode()
+    edited = edit(action='update', proposal_id=repairable['proposal_id'], mask_data=encoded)['defect']
+    assert edited['mask_status'] == 'manual' and edited['confirmed']
+    with Image.open(window.store.folder(edited['proposal_id']) / 'mask.png') as saved:
+        assert saved.size == (960, 640) and np.array_equal(np.asarray(saved), edited_mask)
+
+    new_region = edit(action='update', type='flaking', bbox=[121, 200, 218, 320])['defect']
+    assert new_region['type'] == 'flaking' and new_region['confirmed']
+    assert edit(action='remove', proposal_id=new_region['proposal_id'])['removed'] is True
+    assert 'error' in edit(action='confirm', proposal_id=new_region['proposal_id'])
+    reloaded = json.loads(window.bridge.listLocalDefects(image_id))['defects']
+    assert {defect['proposal_id'] for defect in reloaded} == {edited['proposal_id'], observation['proposal_id']}
+    other_id = json.loads(window.bridge.loadDemo())['id']
+    assert json.loads(window.bridge.listLocalDefects(other_id)) == {'defects': []}
+    assert 'error' in json.loads(window.bridge.editLocalDefect(other_id, json.dumps({
+        'action': 'remove', 'proposal_id': edited['proposal_id'],
+    })))
 
 
 def draw_defect_on_canvas(window):
@@ -329,7 +382,16 @@ def draw_defect_on_canvas(window):
     })()""")
 
 
-def test_default_deepseek_defect_requires_a_hand_drawn_area(window, qt_app, monkeypatch):
+def select_deepseek(window):
+    assert run_js(window, """(() => {
+      const provider = document.querySelector('#vision-provider');
+      provider.value = 'deepseek';
+      provider.dispatchEvent(new Event('change', {bubbles: true}));
+      return provider.value;
+    })()""") == 'deepseek'
+
+
+def test_explicit_deepseek_defect_requires_a_hand_drawn_area(window, qt_app, monkeypatch):
     from mural_agent.deepseek_vision import DeepSeekVisionProvider
     from mural_agent.vision_schema import DefectCandidate, VisionAssessment, VisionImage
 
@@ -348,7 +410,7 @@ def test_default_deepseek_defect_requires_a_hand_drawn_area(window, qt_app, monk
                                 image=VisionImage.from_sizes(source.size, source.size), items=[candidate])
 
     monkeypatch.setattr(DeepSeekVisionProvider, 'analyze', analyze)
-    assert run_js(window, "document.querySelector('#vision-provider').value") == 'deepseek'
+    select_deepseek(window)
     assert '缩小副本' in run_js(window, "document.querySelector('#vision-provider-note').textContent")
     assert run_js(window, "document.querySelector('[data-action=\"load-demo\"]').click(); true") is True
     assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('#auto-button').disabled && document.querySelector('#source-image').naturalWidth > 0"), 30)
@@ -376,15 +438,24 @@ def test_default_deepseek_defect_requires_a_hand_drawn_area(window, qt_app, monk
     assert not window.store.list('job')
 
 
-def test_empty_deepseek_result_preserves_manual_entry(window, qt_app, monkeypatch):
+@pytest.mark.parametrize('provider', ['local', 'deepseek'])
+def test_empty_analysis_result_preserves_manual_entry(window, qt_app, monkeypatch, provider):
+    from mural_agent import desktop_web, vision_analysis
     from mural_agent.deepseek_vision import DeepSeekVisionProvider
     from mural_agent.vision_schema import VisionAssessment, VisionImage
 
-    window.bridge.settings.deepseek_api_key = 'mock-desktop-key'
-    monkeypatch.setattr(DeepSeekVisionProvider, 'analyze', lambda provider, source: VisionAssessment(
-        source='deepseek', model_source='deepseek-flash',
-        image=VisionImage.from_sizes(source.size, source.size), items=[],
-    ))
+    if provider == 'deepseek':
+        window.bridge.settings.deepseek_api_key = 'mock-desktop-key'
+        monkeypatch.setattr(DeepSeekVisionProvider, 'analyze', lambda client, source: VisionAssessment(
+            source='deepseek', model_source='deepseek-flash',
+            image=VisionImage.from_sizes(source.size, source.size), items=[],
+        ))
+        select_deepseek(window)
+    else:
+        monkeypatch.setattr(desktop_web, 'local_model_setup', lambda *args: {
+            'qwen_ready': True, 'sam_ready': False, 'qwen_hint': '', 'sam_hint': '未安装 SAM',
+        })
+        monkeypatch.setattr(vision_analysis, 'assess_image', lambda *args: {'items': []})
     run_js(window, "document.querySelector('[data-action=\"load-demo\"]').click(); true")
     assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('#auto-button').disabled"), 30)
     run_js(window, "document.querySelector('#auto-button').click(); true")
@@ -394,6 +465,29 @@ def test_empty_deepseek_result_preserves_manual_entry(window, qt_app, monkeypatc
     assert run_js(window, "document.querySelector('#damage-status').textContent") == '无候选'
     assert not run_js(window, "document.querySelector('[data-action=\"add-manual-defect\"]').disabled")
     assert not window.store.list('job') and not window.store.list('proposal')
+
+
+def test_missing_local_models_explain_installation_and_keep_manual_workflow(window, qt_app, monkeypatch):
+    from mural_agent.deepseek_vision import DeepSeekVisionProvider
+
+    cloud_calls = []
+    window.bridge.settings.deepseek_api_key = 'mock-key-must-stay-unused'
+    monkeypatch.setattr(DeepSeekVisionProvider, 'analyze', lambda *args: cloud_calls.append(args))
+    run_js(window, "document.querySelector('[data-action=\"load-demo\"]').click(); true")
+    assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('#auto-button').disabled && document.querySelector('#source-image').naturalWidth > 0"), 20)
+    snapshot = json.loads(window.bridge.snapshot())
+    setup = snapshot['models']['local_detection_setup']
+    assert not setup['qwen_ready'] and not setup['sam_ready']
+    assert '4.27 GB' in setup['qwen_hint'] and '156 MB' in setup['sam_hint']
+    assert 'model.safetensors' in setup['qwen_hint'] and 'model.safetensors' in setup['sam_hint']
+    run_js(window, "document.querySelector('#auto-button').click(); true")
+    assert wait_until(qt_app, lambda: run_js(window, "document.querySelector('#auto-status').textContent.includes('Qwen')"), 10)
+    assert '4.27 GB' in run_js(window, "document.querySelector('#vision-provider-note').textContent")
+    assert not cloud_calls and not window.store.list('proposal')
+    run_js(window, "document.querySelector('[data-action=\"open-damage-list\"]').click(); true")
+    run_js(window, "document.querySelector('[data-action=\"add-manual-defect\"]').click(); true")
+    assert draw_defect_on_canvas(window) is True
+    assert wait_until(qt_app, lambda: run_js(window, 'window.__shibui.state.damageItems.length') == 1, 10)
 
 
 def test_damage_modal_and_manual_defect(window, qt_app):

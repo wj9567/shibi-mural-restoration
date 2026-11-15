@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, StringConstraints, model_validator
 
 
-DefectType = Literal['crack', 'paint_loss', 'fading', 'stain', 'other']
+DefectType = Literal['crack', 'paint_loss', 'fading', 'stain', 'flaking', 'other']
 RiskLevel = Literal['low', 'medium', 'high', 'unknown']
 Box = Annotated[list[int], Field(min_length=4, max_length=4)]
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]

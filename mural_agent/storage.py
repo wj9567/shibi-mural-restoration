@@ -71,6 +71,12 @@ class Store:
             rows = con.execute('SELECT document FROM records WHERE kind=? ORDER BY rowid DESC', (kind,)).fetchall()
         return [json.loads(r[0]) for r in rows]
 
+    def delete(self, kind, identifier):
+        """Remove one record; files under its folder are left for the archive."""
+        with self.lock, self.connect() as con:
+            cursor = con.execute('DELETE FROM records WHERE kind=? AND id=?', (kind, identifier))
+        return cursor.rowcount > 0
+
     def folder(self, identifier):
         # Only identifiers issued by this service can be used as a path component.
         if len(identifier) != 32 or any(c not in '0123456789abcdef' for c in identifier):

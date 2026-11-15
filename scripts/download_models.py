@@ -89,11 +89,12 @@ def digest(path):
 def download_model(name):
     repo, revision, folder, license_name = SPECS[name]
     with httpx.Client(timeout=45, follow_redirects=True) as client:
-        response = client.get('https://huggingface.co/api/models/'+repo, params={'blobs': 'true'})
+        response = client.get(f'https://huggingface.co/api/models/{repo}/revision/{revision}',
+                              params={'blobs': 'true'})
         response.raise_for_status()
         info = response.json()
     if info.get('sha') != revision:
-        raise RuntimeError(f'{repo} 当前 revision 已变化；请先人工复核后更新 SPECS。')
+        raise RuntimeError(f'{repo} 返回的 revision 与固定版本不一致。')
     files = []
     for entry in info['siblings']:
         filename = entry['rfilename']
