@@ -130,7 +130,7 @@ def test_region_repair_skips_unconfirmed_and_missing_masks(tmp_path):
                            'metadata': {'type': 'crack', 'bbox_pixels': [10, 10, 20, 20]}})
     result = run_region_candidates(store, engine, image, [missing_mask])
     assert result['jobs'] == []
-    assert '还没有掩膜' in result['skipped'][0]['reason']
+    assert '还没有修复范围' in result['skipped'][0]['reason']
 
     with pytest.raises(ValueError):
         run_region_candidates(store, engine, image, [])

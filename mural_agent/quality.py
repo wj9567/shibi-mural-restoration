@@ -75,7 +75,7 @@ def assess(original, output, mask, thresholds=None):
 def paired_metrics(target, output, mask, perceptual=False):
     """Mask MAE/PSNR plus SSIM/LPIPS on the mask bounding box + 16px context."""
     if target.shape != output.shape or mask.shape != target.shape[:2] or not (mask > 0).any():
-        raise ValueError('配对目标、输出、非空掩膜必须对齐且尺寸一致。')
+        raise ValueError('配对目标、输出、非空修复范围必须对齐且尺寸一致。')
     active = mask > 0
     difference = target.astype(float) - output.astype(float)
     mse = float(np.mean(difference[active] ** 2))

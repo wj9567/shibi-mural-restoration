@@ -30,7 +30,7 @@ def add_mask(store, image_record, payload, proposal_ids=None, mask_source='manua
     klass = normalize_region_class(region_class)
     mask = decode_image(payload, mask=True)
     if mask.size != (image_record['width'], image_record['height']):
-        raise ValueError('掩膜必须与工作图尺寸一致。')
+        raise ValueError('修复范围必须与工作图尺寸一致。')
     array = np.asarray(mask) > 127
     if not array.any():
         raise ValueError('请先用画笔圈选需要修复的区域。')
@@ -73,7 +73,7 @@ def create_job(store, engine, image_record, mask_record, backend, planner, count
     if planner == 'local' and not (engine.settings.vision_model/'provenance.json').exists():
         raise ValueError('本地视觉模型权重尚未安装。')
     if mask_record['image_id'] != image_record['id']:
-        raise ValueError('掩膜不属于当前图像。')
+        raise ValueError('修复范围不属于当前图像。')
     if planner == 'auto' and not (isinstance(auto, dict) and auto.get('steps')):
         raise ValueError('AI 自动任务缺少规划信息。')
     if backend not in {'opencv', 'telea', 'ns', 'lama', 'reference', 'diffusion', 'imagine', 'denoise', 'color', 'deblur', 'research'} or planner not in {'api', 'rules', 'local', 'auto'} or not 1 <= count <= 3:

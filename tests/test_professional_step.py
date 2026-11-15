@@ -261,7 +261,7 @@ def test_enhanced_job_via_api(workbench):
     assert candidate.get('enhanced') is True
     assert candidate.get('speculative') is False
     result = np.asarray(Image.open(BytesIO(client.get(candidate['url']).content)))
-    # 加强允许掩膜 = 露底 ∪ 裂纹；仅保证加强允许掩膜外相对原图不变
+    # 加强允许修复范围 = 露底 ∪ 裂纹；仅保证加强允许修复范围外相对原图不变
     from mural_agent.segmentation import build_enhanced_work_mask
     work_mask, meta = build_enhanced_work_mask(original, mask)
     assert np.array_equal(result[work_mask == 0], original[work_mask == 0])
@@ -295,7 +295,7 @@ def test_enhanced_strength_default_and_work_mask():
 
 def test_risk_ack_and_review_decision_gates():
     mask = {'user_confirmed': True, 'mask_source': 'manual'}
-    with pytest.raises(ValueError, match='已核对掩膜'):
+    with pytest.raises(ValueError, match='已核对修复范围'):
         validate_professional_create(
             mask, rationale='可见露底', evidence_level='conservative', mode='conservative',
             mask_gate_confirmed=False)

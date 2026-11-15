@@ -43,7 +43,7 @@ class ToolRegistry:
                 raise ValueError('需要本幅壁画经人工核验的参考配准。')
             approved = mask_array(store.folder(registration['id']) / 'approved.png')
             if ((mask > 0) & (approved == 0)).any():
-                raise ValueError('缺损超出核验区域；请缩小修复掩膜或重新核验参考。')
+                raise ValueError('缺损超出核验区域；请缩小修复修复范围或重新核验参考。')
             return image_array(store.folder(registration['id']) / 'aligned.png'), {
                 'device': 'cpu', 'registration_id': registration['id'], 'aligned_sha256': registration['aligned_sha256']}
         if step.tool in {'denoise', 'color', 'deblur'}:

@@ -86,7 +86,7 @@ def blend_alpha(mask):
 
 def composite(original, prediction, mask):
     if original.shape != prediction.shape or mask.shape != original.shape[:2]:
-        raise ValueError('图像与掩膜尺寸不一致。')
+        raise ValueError('图像与修复范围尺寸不一致。')
     if np.array_equal(original, prediction):
         return original.copy()
     active = mask > 0

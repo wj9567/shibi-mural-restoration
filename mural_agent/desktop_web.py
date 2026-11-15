@@ -242,7 +242,7 @@ class Bridge(QObject):
             'type': kind, 'bbox': [x0, y0, x1, y1], 'bbox_pixels': [px0, py0, px1, py1],
             'size': str(payload.get('size') or 'manual')[:20],
             'evidence': '人工新增或修正的缺损区域。',
-            'mask_status': 'manual', 'mask_notice': '人工确认的掩膜，需复核。',
+            'mask_status': 'manual', 'mask_notice': '人工确认的修复范围，需复核。',
             'recommendation': recommendation_for({'type': kind, 'size': payload.get('size') or 'manual'}),
             'model_source': 'manual', 'risk_level': 'unknown',
             'local_detection': True, 'region_class': 'fillable_lacuna', 'risk_regions': [],
@@ -434,7 +434,7 @@ class Bridge(QObject):
                 if item.shape == union.shape:
                     union |= item
             if not union.any() or union.all():
-                raise ValueError('缺损候选掩膜不可用，请重新分析或手动画选区。')
+                raise ValueError('缺损候选修复范围不可用，请重新分析或手动画选区。')
             buffer = BytesIO()
             Image.fromarray(union.astype(np.uint8) * 255).save(buffer, format='PNG')
             mask_record = workspace.add_mask(
@@ -521,7 +521,7 @@ class Bridge(QObject):
                 'evidence': metadata['evidence'], 'recommendation': metadata['recommendation'],
                 'proposal_id': identifier, 'region_class': 'fillable_lacuna',
                 'repair_allowed': True, 'risk_notice': metadata['risk_notice'], 'confirmed': True,
-                'mask_status': 'manual', 'mask_notice': '人工框选的掩膜，需复核。',
+                'mask_status': 'manual', 'mask_notice': '人工框选的修复范围，需复核。',
                 'model_source': 'manual',
                 'mask_file_url': self._file_url(folder / 'mask.png'),
                 'mask_overlay_data': self._mask_overlay(array),
@@ -538,7 +538,7 @@ class Bridge(QObject):
             image = self.store.get('image', request['image_id'])
             mask = self.store.get('mask', request['mask_id'])
             if not image or not mask:
-                raise ValueError('图像或掩膜不存在。')
+                raise ValueError('图像或修复范围不存在。')
             job = workspace.create_job(
                 self.store, self.engine, image, mask, request['backend'], request['planner'],
                 int(request['candidate_count']), request.get('instructions', ''),
@@ -620,6 +620,92 @@ class Bridge(QObject):
         return self._result(action)
 
     @Slot(str, result=str)
+    def autoConfirmDefect(self, request_json):
+        """One click: confirm the region and make sure a usable repair range exists."""
+        def action():
+            request = json.loads(request_json)
+            image = self.store.get('image', request.get('image_id'))
+            if not image:
+                raise ValueError('图像记录不存在。')
+            ids = request.get('proposal_ids') or ([request.get('proposal_id')] if request.get('proposal_id') else [])
+            ids = [identifier for identifier in dict.fromkeys(ids) if identifier]
+            if not ids:
+                raise ValueError('没有指定要确认的区域。')
+            import numpy as np
+            from .imaging import image_array
+            from .review_workflow import bump_revision, set_identification
+
+            def ensure_range(proposal):
+                metadata = dict(proposal.get('metadata') or {})
+                mask_path = self.store.folder(proposal['id']) / 'mask.png'
+                if mask_path.is_file():
+                    existing = mask_array(mask_path)
+                    if existing.shape == (image['height'], image['width']) and (existing > 0).any():
+                        return 'kept', metadata
+                bbox = metadata.get('bbox_pixels') or []
+                try:
+                    x0, y0, x1, y1 = [int(value) for value in bbox]
+                except (TypeError, ValueError):
+                    raise ValueError('该区域没有可用的定位框，请先手动框选。') from None
+                width, height = image['width'], image['height']
+                x0, x1 = max(0, min(width - 1, x0)), max(1, min(width, x1))
+                y0, y1 = max(0, min(height - 1, y0)), max(1, min(height, y1))
+                if x1 - x0 < 4 or y1 - y0 < 4:
+                    raise ValueError('该区域定位框太小，请先手动框选。')
+                generated = 'rectangle'
+                array = None
+                if self.engine.sam.available():
+                    try:
+                        working = image_array(self.store.folder(image['id']) / 'image.png')
+                        candidate, info = self.engine.sam.predict(working, box=[x0, y0, x1, y1])
+                        candidate = np.asarray(candidate)
+                        score = float((info or {}).get('predicted_iou') or 0)
+                        if candidate.shape == (height, width) and (candidate > 127).any() and score >= .5:
+                            array = (candidate > 127).astype(np.uint8) * 255
+                            generated = 'sam'
+                    except Exception:  # noqa: BLE001 — fall back to the confirmed box
+                        array = None
+                if array is None:
+                    array = np.zeros((height, width), np.uint8)
+                    array[y0:y1, x0:x1] = 255
+                Image.fromarray(array).save(mask_path)
+                metadata.update(
+                    mask_status='sam' if generated == 'sam' else 'manual',
+                    mask_notice='SAM 自动生成，需人工核对。' if generated == 'sam'
+                    else '按确认框自动生成矩形范围，可再用画笔修正。')
+                return generated, metadata
+
+            defects, generated, skipped = [], [], []
+            for proposal_id in ids:
+                proposal = self.store.get('proposal', proposal_id)
+                if not proposal or proposal.get('image_id') != image['id']:
+                    skipped.append({'proposal_id': proposal_id, 'reason': '缺损记录不存在或不属于当前图像'})
+                    continue
+                try:
+                    kind, metadata = ensure_range(proposal)
+                    mask = mask_array(self.store.folder(proposal_id) / 'mask.png')
+                    self.store.update('proposal', proposal_id, metadata=metadata, confirmed=True,
+                                      fraction=round(float((mask > 0).mean()), 6))
+                    proposal = set_identification(self.store, self.store.get('proposal', proposal_id),
+                                                  'confirmed', '一键确认：识别与修复范围已生成')
+                    if kind == 'kept':
+                        from .review_workflow import record_event
+                        record_event(self.store, image_id=image['id'], proposal_id=proposal_id,
+                                     action='auto_confirm', changes={'mask': 'kept'},
+                                     decision='confirmed', note='一键确认（沿用已有修复范围）')
+                    else:
+                        bump_revision(self.store, proposal_id, '自动确认并生成修复范围',
+                                      changes={'mask': kind}, action='auto_confirm',
+                                      note='一键确认并生成修复范围')
+                    proposal = self.store.get('proposal', proposal_id)
+                    defects.append(self._local_defect(proposal))
+                    generated.append(kind)
+                except ValueError as exc:
+                    skipped.append({'proposal_id': proposal_id, 'reason': str(exc)[:200]})
+            return {'defects': defects, 'generated': generated, 'skipped': skipped}
+        return self._result(action)
+
+    @Slot(str, result=str)
     def reviewCandidate(self, request_json):
         """Stage 6: accept / reject / expert-review / preview one repair candidate."""
         def action():
@@ -684,7 +770,7 @@ class Bridge(QObject):
     @Slot(result=str)
     def importMask(self):
         def action():
-            path, _ = QFileDialog.getOpenFileName(None, '导入掩膜', '', '图像 (*.png *.jpg *.jpeg)')
+            path, _ = QFileDialog.getOpenFileName(None, '导入选区', '', '图像 (*.png *.jpg *.jpeg)')
             return {'mask_data': base64.b64encode(Path(path).read_bytes()).decode()} if path else None
         return self._result(action)
 
@@ -778,7 +864,7 @@ class Bridge(QObject):
             metadata.update({key: item[key] for key in ('index', 'type', 'size', 'confidence', 'evidence', 'bbox') if key in item})
             metadata['recommendation'] = recommendation_for(item)
             return self._save_proposal(image_id, mask, metadata)
-        return self._result(lambda: self._aux(action, '细化缺损掩膜…'))
+        return self._result(lambda: self._aux(action, '细化缺损修复范围…'))
 
     @Slot(str, result=str)
     def adoptProposal(self, proposal_id):
@@ -840,7 +926,7 @@ class Bridge(QObject):
             masked = sum(1 for entry in entries if entry['mask_status'] == 'sam')
             if defects:
                 summary = (f'本地 Qwen3-VL 识别到 {len(defects)} 处疑似病害，其中 {masked} 处已由 SAM 2.1 '
-                           '生成掩膜候选；其余保留候选框，请逐项核对后确认。')
+                           '生成修复范围候选；其余保留候选框，请逐项核对后确认。')
             else:
                 summary = '本地 Qwen3-VL 未发现明确缺损；可手动圈选缺损区域。'
             context = assessment.cultural_context.model_dump(mode='json') if assessment.cultural_context else {}
@@ -965,14 +1051,14 @@ class Bridge(QObject):
                     import numpy as np
                     mask = decode_image(base64.b64decode(payload['mask_data'], validate=True), mask=True)
                     if mask.size != (image['width'], image['height']):
-                        raise ValueError('掩膜尺寸必须与原图一致。')
+                        raise ValueError('修复范围尺寸必须与原图一致。')
                     array = (np.asarray(mask) > 127).astype(np.uint8) * 255
                     if not array.any():
-                        raise ValueError('掩膜不能为空，请先圈选要修复的像素。')
+                        raise ValueError('修复范围不能为空，请先圈选要修复的像素。')
                     Image.fromarray(array).save(self.store.folder(proposal_id) / 'mask.png')
                     fraction = round(float(array.mean()), 6)
                     mask_source = 'manual'
-                    metadata.update(mask_status='manual', mask_notice='人工修正的掩膜，需复核。')
+                    metadata.update(mask_status='manual', mask_notice='人工修正的修复范围，需复核。')
                 if payload.get('bbox'):
                     try:
                         bbox = [int(value) for value in payload['bbox']]
@@ -997,7 +1083,7 @@ class Bridge(QObject):
                                          fraction=fraction, mask_source=mask_source)
             if any(changed.values()):
                 # Any manual region change invalidates candidates made from the old mask.
-                bump_revision(self.store, proposal_id, '掩膜或区域已人工修改',
+                bump_revision(self.store, proposal_id, '修复范围或区域已人工修改',
                               changes={key: value for key, value in changed.items() if value},
                               action='region_update', note=note)
                 proposal = self.store.get('proposal', proposal_id)
@@ -1089,9 +1175,9 @@ class Bridge(QObject):
                  'hint': '样例素材与许可见 图片/来源与许可.md。'},
                 {'key': 'identify', 'label': '本地 Qwen3-VL 识别疑似病害', 'done': bool(proposals),
                  'hint': '点击“AI 分析缺损与文化线索”。'},
-                {'key': 'mask', 'label': 'SAM 生成或人工修正掩膜', 'done': any(
+                {'key': 'mask', 'label': 'SAM 生成或人工修正修复范围', 'done': any(
                     (proposal.get('metadata') or {}).get('mask_status') for proposal in proposals),
-                 'hint': '在缺损清单中确认区域、修正掩膜。'},
+                 'hint': '在缺损清单中确认区域、修正修复范围。'},
                 {'key': 'repair', 'label': '本地 LaMa/OpenCV 生成修复候选', 'done': any(
                     job.get('candidates') for job in jobs),
                  'hint': '点“生成修复候选（本地补全）”。'},
@@ -1123,7 +1209,7 @@ class Bridge(QObject):
             from . import repair_assessment
             cases = repair_assessment.collect_cases(self.store, image, (job or {}).get('id'))
             if not cases:
-                raise ValueError('请先确认缺损区域并生成掩膜，再请求 AI 修复评估。')
+                raise ValueError('请先确认缺损区域并生成修复范围，再请求 AI 修复评估。')
             if not any(case['candidate'] for case in cases):
                 raise ValueError('还没有本地修复候选可供评估，请先生成修复候选。')
             context = str(request.get('context') or '')[:800]
@@ -1180,7 +1266,7 @@ class Bridge(QObject):
                 elif not proposal.get('confirmed'):
                     skipped.append({'proposal_id': proposal_id, 'reason': '该缺损项尚未人工确认，请先在清单中确认'})
                 elif not (self.store.folder(proposal_id) / 'mask.png').is_file():
-                    skipped.append({'proposal_id': proposal_id, 'reason': '该缺损项还没有掩膜，请先手动圈选或修正掩膜'})
+                    skipped.append({'proposal_id': proposal_id, 'reason': '该缺损项还没有修复范围，请先手动圈选或修正修复范围'})
                 else:
                     confirmed_ids.append(proposal_id)
             if not confirmed_ids:
@@ -1205,7 +1291,7 @@ class Bridge(QObject):
             import numpy as np
             current = np.asarray(decode_image(base64.b64decode(current_mask), mask=True)) > 127
             if current.shape != incoming.shape:
-                raise ValueError('当前掩膜与辅助选区尺寸不一致。')
+                raise ValueError('当前修复范围与辅助选区尺寸不一致。')
             merged = incoming | current
             identifier = new_id()
             Image.fromarray(merged.astype('uint8') * 255).save(self.store.folder(identifier) / 'mask.png')
@@ -1314,7 +1400,7 @@ class Bridge(QObject):
                 mask = decode_image(mask_path.read_bytes(), mask=True)
                 pixels = np.asarray(mask) > 127
                 if image.size != mask.size or not pixels.any() or pixels.all():
-                    raise ValueError('无效的批量图像或掩膜：' + path.name)
+                    raise ValueError('无效的批量图像或修复范围：' + path.name)
             queued = []
             for path, mask_path in pairs:
                 image = workspace.add_image(self.store, path.read_bytes(), path.name)

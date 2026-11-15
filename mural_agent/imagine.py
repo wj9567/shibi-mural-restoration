@@ -119,7 +119,7 @@ def _png_bytes(array: np.ndarray, mode: str = "RGB") -> bytes:
 def prepare_edit_inputs(original: np.ndarray, mask: np.ndarray, max_side: int = MAX_SIDE):
     """Blank the mask so the edit request shows a hole, and cap the upload size."""
     if mask.ndim != 2:
-        raise ValueError("掩膜尺寸不正确。")
+        raise ValueError("修复范围尺寸不正确。")
     if not (mask > 0).any():
         raise ValueError("请先圈选需要云端生图填补的区域。")
     marked = np.array(original, copy=True)
@@ -331,7 +331,7 @@ class ImagineClient:
             "model": self.config.model,
             "endpoint": "/images/edits",
             "device": "cloud",
-            "note": "云端生图按整图编辑，不是严格掩膜 inpaint；调用方须把结果合成回掩膜内。",
+            "note": "云端生图按整图编辑，不是严格修复范围 inpaint；调用方须把结果合成回修复范围内。",
         }
         return generated, meta
 

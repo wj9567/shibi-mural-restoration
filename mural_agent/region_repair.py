@@ -49,12 +49,12 @@ def validated_region(store, image, proposal):
         raise ValueError('缺损项尚未人工确认，请先在缺损清单中确认。')
     mask_path = store.folder(proposal['id']) / 'mask.png'
     if not mask_path.is_file():
-        raise ValueError('该缺损项还没有掩膜，请先手动圈选或修正掩膜。')
+        raise ValueError('该缺损项还没有修复范围，请先手动圈选或修正修复范围。')
     mask = mask_array(mask_path)
     if mask.shape != (image['height'], image['width']):
-        raise ValueError('掩膜尺寸与原图不一致，请重新保存掩膜。')
+        raise ValueError('修复范围尺寸与原图不一致，请重新保存修复范围。')
     if not (mask > 0).any():
-        raise ValueError('掩膜为空，请先圈选实际缺损像素。')
+        raise ValueError('修复范围为空，请先圈选实际缺损像素。')
     return mask, proposal.get('metadata') or {}
 
 
@@ -99,10 +99,10 @@ def run_region_candidates(store, engine, image, proposal_ids, instructions=''):
             user_confirmed=True, region_class='fillable_lacuna', risk_regions=[])
         label = TYPE_LABELS.get(kind, kind)
         rationale = (f'缺损清单中的{label}区域：{reason} '
-                     f'掩膜占比 {mask_record["fraction"]:.2%}；结果须人工复核。')
+                     f'修复范围占比 {mask_record["fraction"]:.2%}；结果须人工复核。')
         job = workspace.create_job(
             store, engine, image, mask_record, backend, 'rules', 1,
-            instructions or f'仅修复该缺损区域（{label}），保持掩膜外像素不变。',
+            instructions or f'仅修复该缺损区域（{label}），保持修复范围之外的像素不变。',
             mode='conservative', budget={'candidates': 1, 'revisions': 0, 'timeout_seconds': 300},
             workflow='professional_step', rationale=rationale,
             evidence_level='conservative', mask_source=proposal.get('mask_source') or 'ai_candidate',

@@ -39,9 +39,9 @@ def import_manifest(store, path):
             target = decode_image(files['target'].read_bytes())
             mask = decode_image(files['mask'].read_bytes(), mask=True)
             if target.size != image.size or mask.size != image.size:
-                raise ValueError('配对图像、目标和掩膜必须已经对齐且尺寸一致。')
+                raise ValueError('配对图像、目标和修复范围必须已经对齐且尺寸一致。')
             if not (np.asarray(mask) > 127).any():
-                raise ValueError('配对掩膜不能为空。')
+                raise ValueError('配对修复范围不能为空。')
         resolved.append((entry, files))
 
     # Only write records after every manifest entry has passed validation.

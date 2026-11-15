@@ -102,7 +102,7 @@ class Engine:
             overlay = original.copy()
             active = mask > 0
             overlay[active] = (.5*overlay[active] + .5*np.array([220, 64, 48])).astype(np.uint8)
-            self.store.event(job['id'], '调用本地视觉模型规划，不发送图片。' if job['planner'] == 'local' else '调用视觉 API 规划：发送缩略图、掩膜预览和备注。')
+            self.store.event(job['id'], '调用本地视觉模型规划，不发送图片。' if job['planner'] == 'local' else '调用视觉 API 规划：发送缩略图、选区预览和备注。')
             try:
                 if job['planner'] == 'local':
                     plan = local_plan(self, job, original, overlay)
@@ -196,7 +196,7 @@ class Engine:
             original, mask = self.validate_inputs(job, image, mask_record)
             from .professional import validate_job_record_for_execution
             validate_job_record_for_execution(job, mask_record)
-            self.store.event(job_id, '已校验原图与冻结掩膜 hash；候选始终从该输入版本产生。')
+            self.store.event(job_id, '已校验原图与冻结修复范围 hash；候选始终从该输入版本产生。')
             enhanced_meta = None
             base_for_tools = original
             if job.get('mode') == 'enhanced':
@@ -227,7 +227,7 @@ class Engine:
                 crk = enhanced_meta.get('crack_fraction', 0)
                 self.store.event(
                     job_id,
-                    f'加强允许掩膜占比 {frac:.2%}（选中缺损 {lac:.2%} + 附近裂纹 {crk:.2%}）。')
+                    f'加强允许修复范围占比 {frac:.2%}（选中缺损 {lac:.2%} + 附近裂纹 {crk:.2%}）。')
             if job.get('plan'):
                 plan = Plan.model_validate(job['plan'])
             else:
@@ -283,15 +283,15 @@ class Engine:
                         metrics['evaluated_mask'] = 'enhanced_work_mask'
                         metrics['evaluated_mask_file'] = 'enhanced_work_mask.png'
                         metrics['evaluated_mask_note'] = (
-                            'outside_unchanged 与边界指标对应加强修复实际使用的扩大工作掩膜 '
+                            'outside_unchanged 与边界指标对应加强修复实际使用的扩大后的修复范围 '
                             'enhanced_work_mask.png，不是用户原始 mask.png。')
                     else:
                         metrics['evaluated_mask'] = 'original_mask'
                         metrics['evaluated_mask_file'] = 'mask.png'
                         metrics['evaluated_mask_note'] = (
-                            'outside_unchanged 与边界指标对应用户原始掩膜 mask.png。')
+                            'outside_unchanged 与边界指标对应用户原始修复范围 mask.png。')
                     if not metrics['outside_unchanged']:
-                        raise RuntimeError('候选未通过掩膜外一致性检查。')
+                        raise RuntimeError('候选未通过修复范围外一致性检查。')
                     folder = self.store.folder(identifier)
                     Image.fromarray(output).save(folder/'result.png')
                     difference = make_difference(original, output)

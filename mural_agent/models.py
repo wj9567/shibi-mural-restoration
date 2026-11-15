@@ -75,7 +75,7 @@ class LamaBackend:
                 model_mask = cv2.dilate(crop_mask, np.ones((2 * radius + 1, 2 * radius + 1), np.uint8))
             mask_small = np.asarray(Image.fromarray(model_mask).resize(size, Image.Resampling.NEAREST)).copy()
             if not (mask_small > 127).any():
-                raise ValueError('掩膜在推理缩放下丢失；请扩大圈选范围或提高推理分辨率。')
+                raise ValueError('修复范围在推理缩放下丢失；请扩大圈选范围或提高推理分辨率。')
             h, w = image.shape[:2]
             image = np.pad(image, ((0, (-h) % 8), (0, (-w) % 8), (0, 0)), mode='symmetric')
             mask_small = np.pad(mask_small, ((0, (-h) % 8), (0, (-w) % 8)), mode='constant')
