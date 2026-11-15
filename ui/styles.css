@@ -190,6 +190,16 @@ textarea { resize: vertical; min-height: 66px; line-height: 1.5; }
 .review-history.hidden { display: none; }
 .review-event { display: flex; gap: 6px; line-height: 1.6; }
 .review-event span { color: #8a94a3; min-width: 78px; }
+.export-row { display: flex; gap: 8px; flex: 0 0 auto; align-items: center; }
+.export-row .button { font-size: 11px; }
+.demo-card { width: min(680px, calc(100vw - 32px)); }
+.demo-steps { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.demo-step { display: flex; gap: 9px; align-items: flex-start; padding: 6px 8px; border: 1px solid var(--line); border-radius: 5px; }
+.demo-step.done { background: #f2f8f3; border-color: #b9d8c0; }
+.demo-mark { width: 22px; height: 22px; flex: 0 0 22px; display: grid; place-items: center; border-radius: 50%; background: #e8ecf1; font-size: 11px; }
+.demo-step.done .demo-mark { background: #2f6b3a; color: #fff; }
+.demo-step strong { display: block; font-size: 12px; }
+.demo-step small { color: var(--muted); font-size: 10px; }
 .comparison-toolbar { display: flex; align-items: center; gap: 8px; color: #858d96; font-size: 9px; }
 .comparison-toolbar select { width: 106px; padding: 5px 6px; }
 .comparison-toolbar input[type="range"] { flex: 1; min-width: 50px; }

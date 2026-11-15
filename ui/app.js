@@ -676,6 +676,27 @@
       + `${record.limitations ? ` ${escapeHtml(record.limitations)}` : ''}</div>`;
   }
 
+  async function exportPdf(method, payload) {
+    if (method === 'exportObservationCard' && !state.image) return toast('请先打开一幅壁画。');
+    if (method === 'exportRepairReport' && !state.job) return toast('请先选择一个修复任务。');
+    try {
+      const result = await invoke(method, JSON.stringify(payload));
+      if (!result?.saved) return;
+      toast(`已导出 PDF（${result.pages} 页）。`);
+    } catch (error) { notifyError(error); }
+  }
+
+  async function openDemoGuide() {
+    if (!state.image) return toast('请先打开一幅壁画。');
+    const status = await invoke('demoStatus', state.image.id);
+    const steps = status.steps || [];
+    $('#demo-progress').textContent = `${status.done}/${status.total}`;
+    $('#demo-steps').innerHTML = steps.map((step, index) =>
+      `<div class="demo-step ${step.done ? 'done' : ''}"><span class="demo-mark">${step.done ? '✓' : index + 1}</span>`
+      + `<div><strong>${escapeHtml(step.label)}</strong><small>${escapeHtml(step.hint || '')}</small></div></div>`).join('');
+    showModal('demo-modal');
+  }
+
   async function reviewCandidateAction(action) {
     if (!state.job || !state.candidate) return toast('请先选择一个修复候选。');
     if (state.running || state.autoBusy) return toast('请等待当前任务完成。');
@@ -1655,6 +1676,14 @@
         case 'assess-repair': await assessRepair(); break;
         case 'review-expert': await reviewCandidateAction('expert_review'); break;
         case 'review-preview': await reviewCandidateAction('experimental_preview'); break;
+        case 'export-observation-card':
+          await exportPdf('exportObservationCard', { image_id: state.image?.id });
+          break;
+        case 'export-repair-report':
+          await exportPdf('exportRepairReport', { job_id: state.job?.id });
+          break;
+        case 'open-demo-guide': await openDemoGuide(); break;
+        case 'close-demo-guide': hideModal('demo-modal'); break;
         case 'cancel-job': { const identifier = state.activeJobId || state.job?.id; if (identifier) { await invoke('cancelJob', identifier); } await refresh(); break; }
         case 'resume-job': if (state.job) await invoke('resumeJob', state.job.id); await refresh(); break;
         case 'select-candidate': {

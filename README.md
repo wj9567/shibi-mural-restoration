@@ -14,6 +14,7 @@
 - 缺损清单可对已确认掩膜生成本地修复候选：整图修复、区域修复和差异图，支持逐区域查看与重新生成；几何缺损优先 LaMa，褪色/污染不强制补洞。
 - 修复候选可交给 DeepSeek 做**辅助评估**：按本地区域编号返回观察、修复评价、建议、依据、风险与人工复核原因；模型只给建议，不改掩膜、像素或审核状态，接口失败也不影响本地复核。
 - 人工审核工作流区分“病害识别确认”和“候选修复审核”：支持接受/驳回/标记专家复核/试验性预览/修改区域与建议；人工改动后旧候选与 AI 评估自动标记为待更新，审核记录可追溯，历史任务可恢复。
+- 可导出一页 **AI 壁画观察卡 PDF**（原图标注、病害依据、保护建议、AI 使用情况、不确定性、来源许可）和可选的 **修复成果说明 PDF**（前后对比、方法参数、输出检查、风险与审核记录）；内置“演示流程”导航，只展示真实完成步骤。
 - 保存历史任务，支持查看、续跑、参考资料配准和工作空间备份。
 
 ## 安装
@@ -48,7 +49,7 @@ python -m venv .venv
 4. 逐项运行，或运行全部。需要本地自动修复时，点缺损清单里的“生成修复候选（本地补全）”，或逐项点“生成修复候选”；结果页会显示整图、区域和差异图，并可按区域“重新生成此区域”。
 5. 需要 AI 辅助评价时，在结果页点“AI 修复评估（DeepSeek）”；可按区域查看建议、风险和人工复核原因。该结果仅为建议，不改变本地图像与审核状态。
 6. 需要时打开“三分屏对照”，分别生成 AI 大面积修补和全 AI 图。
-6. 对比结果与差异，复核后保存图像或导出档案。
+7. 复核后保存图像、导出 ZIP 档案，或导出“AI 观察卡 PDF / 修复说明 PDF”；“演示流程”会列出当前真实完成的步骤。
 
 手动圈选及本地规则修补无需密钥。缺损识别和文化观察是待核对的模型建议，适用于数字修复实验。大面积语义缺失需要参考资料或专家判断。
 
@@ -69,6 +70,8 @@ python -m venv .venv
 .\.venv\Scripts\python.exe scripts/verify_local_detection.py
 .\.venv\Scripts\python.exe scripts/verify_region_repair.py
 .\.venv\Scripts\python.exe scripts/verify_repair_assessment.py
+.\.venv\Scripts\python.exe scripts/verify_startup.py
+.\.venv\Scripts\python.exe scripts/verify_competition_demo.py
 ```
 
 测试包含本地业务逻辑、API 开发适配器和 Qt WebEngine 桌面桥接。CI（`.github/workflows/tests.yml`）在 Windows 上运行非 WebEngine 测试、`node --check` 与 `compileall`。完整依赖清单见 [requirements.txt](requirements.txt)、[requirements-models.txt](requirements-models.txt) 和 [requirements-dev.txt](requirements-dev.txt)。
