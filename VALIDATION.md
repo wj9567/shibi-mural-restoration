@@ -1,6 +1,6 @@
 # 验证状态
 
-更新时间：2026-11-16（阶段 6：统一人工审核工作流）
+更新时间：2026-11-16（阶段 7：校赛观察卡、修复说明与端到端验收）
 
 ## 自动化测试
 
@@ -8,7 +8,7 @@
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-最近一次完整运行：**184 passed, 1 warning**（约 57 秒，exit 0；157 项非 WebEngine + 27 项 WebEngine）。覆盖：
+最近一次完整运行：**190 passed, 1 warning**（约 68 秒，exit 0；162 项非 WebEngine + 28 项 WebEngine）。覆盖：
 
 - 业务/API/规划器/存储/备份；
 - 风险分类与专业门禁（含两条门禁绕过回归：uncertain 掩膜、standard 工作流 enhanced）；
@@ -39,7 +39,9 @@
 - 人工审核工作流（阶段 6）：识别确认与候选审核分离（未确认识别不能审核/导出）、接受/驳回/专家复核/试验性预览、试验性预览不进入选定且不可导出；
 - 人工修改掩膜、区域或修复建议后版本号 +1，旧候选、`job.ai_review` 与 `assessment` 同时标记过期，过期候选不能接受或导出；
 - 审核事件记录区域编号、操作、时间、修改内容、决定和备注；重新打开存储后事件、识别状态、候选状态与任务选择均可恢复；
-- 导出限制：未确认识别、过期候选、已驳回、需专家复核、试验性预览、推测性未归档都会被 `export_guard` 阻止（`engine.export` 与“保存修复图像”共用）；旧的手动任务保持原有选定流程。
+- 导出限制：未确认识别、过期候选、已驳回、需专家复核、试验性预览、推测性未归档都会被 `export_guard` 阻止（`engine.export` 与“保存修复图像”共用）；旧的手动任务保持原有选定流程；
+- 校赛 PDF 输出（阶段 7）：观察卡固定 1 页、修复说明固定 2 页；中文可提取、包含重点标注/依据/建议/AI 使用/复核提示/来源许可；超长文本以省略号截断且不溢出；报告包含前后对比、方法参数、设备、权重 SHA-256、输出检查、风险与审核记录；
+- 桥接导出（可指定路径供自动化）与“演示流程”状态（7 步，只反映真实完成情况）；WebEngine 端 PDF 按钮与演示弹窗渲染。
 
 ## 本地 Qwen3-VL + SAM 2.1 真实推理（2026-11-16）
 
@@ -82,6 +84,19 @@
 - 报告：`artifacts/repair-assessment-verification.json`。
 - 过程中的真实问题：首次验收返回 HTTP 400。最小诊断确认 **`response_format: json_object` 与 `safety_check` 不能同时使用**；该组合原本也存在于 `analyze()`（DeepSeek 缺损识别）中，属于此前只有 Mock 覆盖、未真实调用暴露的问题。已改为不发送 `response_format`，并让解析器接受围栏/夹杂文本中的 JSON。为定位问题共做了 3 次最小诊断请求，加上 1 次失败验收与 1 次成功重试，总计 5 次小请求。
 
+## 校赛端到端真实演示（2026-11-16）
+
+`scripts/verify_competition_demo.py` 使用真实模型和真实 DeepSeek 请求，在许可证明确的样例图 `图片/01-cma-1963.252.jpg`（Cleveland Museum of Art 1963.252，CC0）上跑完整流程：
+
+- 导入：900×626，按 SHA-256 命中 `图片/清单.jsonl` 的来源与许可。
+- 本地识别：Qwen3-VL 真实推理 142.48 秒，6 个候选（crack / paint_loss / flaking），其中 4 个 SAM 掩膜通过校验；演示采用 1 个 SAM 掩膜（未使用人工回退）。
+- 本地修复：LaMa 真实推理 3.4 秒（CPU），输出 900×626，掩膜外差异 0，原图 SHA-256 未变。
+- DeepSeek 评估：真实请求 8.02 秒，1 个区域且 `region_id` 对齐，`human_review_required=false`，密钥未泄漏。
+- 人工审核：识别确认 + 候选接受，写入 `candidate_accept` 事件。
+- PDF：观察卡 **1 页**、修复说明 **2 页**，均无截断；报告 `artifacts/competition-demo/demo-report.json`，PDF 同目录。
+- 启动检查：`scripts/verify_startup.py` 通过，`page_loaded=true`，`lama/sam2/vision/deepseek_vision` 均检测为可用。
+- 边界：这是工程演示，不是文物鉴定；只展示实际发生的步骤，不编造置信度、精度或专家结论。
+
 ## 静态检查
 
 ```powershell
@@ -122,6 +137,8 @@ git diff --check
 - 本机 `dist/Shibi-1.0` 是 2026-10-31 的旧构建，包含已删除的旧 UI 代码，不能作为当前交付物；需要重新构建或删除。
 - 审核状态机没有独立的形式化模型（未做状态图/穷举验证），靠单元测试覆盖主要迁移；手工改库仍可绕过，属于本地单用户工具的信任边界。
 - 阶段 6 未新增真实模型或 API 调用；此前阶段 4/5 的真实推理与真实 DeepSeek 验收结果仍然有效。
+- 校赛 PDF 依赖 reportlab 与系统中文字体；缺少字体时会明确报错（可设 `MURAL_PDF_FONT`）。超长内容会截断而不是分页，观察卡固定 1 页、修复说明固定 2 页。
+- 本次端到端演示只标注 1 处重点区域（工具支持 1–3 处）；DeepSeek 返回的可见依据可能保持英文原文，未强制翻译。
 - 工程像素指标与合成缺损测试不能证明补全内容符合壁画历史原貌。应用输出仅供数字修复实验与人工复核。
 
 ## 可复现入口
@@ -133,6 +150,8 @@ git diff --check
 .\.venv\Scripts\python.exe scripts/verify_local_detection.py
 .\.venv\Scripts\python.exe scripts/verify_region_repair.py
 .\.venv\Scripts\python.exe scripts/verify_repair_assessment.py
+.\.venv\Scripts\python.exe scripts/verify_startup.py
+.\.venv\Scripts\python.exe scripts/verify_competition_demo.py
 ```
 
 CI：`.github/workflows/tests.yml` 运行非 WebEngine 测试、`node --check` 与 `compileall`。

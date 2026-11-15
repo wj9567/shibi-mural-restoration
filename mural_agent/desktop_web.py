@@ -1029,6 +1029,83 @@ class Bridge(QObject):
         return self._result(action)
 
     @Slot(str, result=str)
+    def exportObservationCard(self, request_json):
+        """Stage 7: one-page AI observation card PDF (optional explicit path for automation)."""
+        def action():
+            request = json.loads(request_json)
+            image = self.store.get('image', request.get('image_id'))
+            if not image:
+                raise ValueError('图像记录不存在。')
+            path = request.get('path')
+            if not path:
+                path, _ = QFileDialog.getSaveFileName(None, '导出 AI 壁画观察卡',
+                                                      'mural-observation-card.pdf', 'PDF 文件 (*.pdf)')
+            if not path:
+                return {'saved': False}
+            from .competition_output import build_observation_card
+            result = build_observation_card(self.store, image, Path(path))
+            self.notify.emit('AI 壁画观察卡已导出。')
+            return {'saved': True, **result}
+        return self._result(action)
+
+    @Slot(str, result=str)
+    def exportRepairReport(self, request_json):
+        """Stage 7: optional two-page repair report PDF."""
+        def action():
+            request = json.loads(request_json)
+            job = self.store.get('job', request.get('job_id'))
+            if not job:
+                raise ValueError('修复任务不存在。')
+            image = self.store.get('image', job['image_id'])
+            path = request.get('path')
+            if not path:
+                path, _ = QFileDialog.getSaveFileName(None, '导出修复成果说明',
+                                                     f'mural-repair-{job["id"][:8]}.pdf', 'PDF 文件 (*.pdf)')
+            if not path:
+                return {'saved': False}
+            from .competition_output import build_repair_report
+            result = build_repair_report(self.store, image, job, Path(path))
+            self.notify.emit('修复成果说明已导出。')
+            return {'saved': True, **result}
+        return self._result(action)
+
+    @Slot(str, result=str)
+    def demoStatus(self, image_id):
+        """Honest demo guide: report which real steps are already complete."""
+        def action():
+            image = self.store.get('image', image_id)
+            if not image:
+                raise ValueError('图像记录不存在。')
+            proposals = [proposal for proposal in self.store.list('proposal')
+                         if proposal.get('image_id') == image['id']]
+            jobs = [job for job in self.store.list('job') if job.get('image_id') == image['id']]
+            assessments = [record for record in self.store.list('assessment')
+                           if record.get('image_id') == image['id']]
+            candidate_reviewed = any(
+                (candidate.get('review') or {}).get('status') for job in jobs
+                for candidate in job.get('candidates') or [])
+            steps = [
+                {'key': 'import', 'label': '导入有明确许可的壁画图像', 'done': True,
+                 'hint': '样例素材与许可见 图片/来源与许可.md。'},
+                {'key': 'identify', 'label': '本地 Qwen3-VL 识别疑似病害', 'done': bool(proposals),
+                 'hint': '点击“AI 分析缺损与文化线索”。'},
+                {'key': 'mask', 'label': 'SAM 生成或人工修正掩膜', 'done': any(
+                    (proposal.get('metadata') or {}).get('mask_status') for proposal in proposals),
+                 'hint': '在缺损清单中确认区域、修正掩膜。'},
+                {'key': 'repair', 'label': '本地 LaMa/OpenCV 生成修复候选', 'done': any(
+                    job.get('candidates') for job in jobs),
+                 'hint': '点“生成修复候选（本地补全）”。'},
+                {'key': 'assess', 'label': 'DeepSeek 修复评估（可选）', 'done': bool(assessments),
+                 'hint': '结果页点“AI 修复评估”，需本机密钥。'},
+                {'key': 'review', 'label': '人工审核并接受/驳回候选', 'done': candidate_reviewed,
+                 'hint': '选择候选后点“确认复核决定”或标记专家复核。'},
+                {'key': 'export', 'label': '导出观察卡与修复说明 PDF', 'done': False,
+                 'hint': '点击“导出 AI 观察卡 PDF”或“导出修复说明 PDF”。'},
+            ]
+            return {'steps': steps, 'done': sum(step['done'] for step in steps), 'total': len(steps)}
+        return self._result(action)
+
+    @Slot(str, result=str)
     def assessRepair(self, request_json):
         """Stage 5: advisory DeepSeek review of existing local repair results."""
         def action():

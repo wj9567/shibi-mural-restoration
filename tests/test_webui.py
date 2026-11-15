@@ -933,3 +933,20 @@ def test_review_states_audit_history_and_expert_actions_render(window, qt_app):
                           " window.__shibui.state.candidate = null;"
                           " window.__shibui.renderJob(window.__shibui.state.job); true") is True
     assert '已采纳' in run_js(window, "document.querySelector('#candidate-strip').textContent")
+
+
+def test_competition_pdf_buttons_and_demo_guide(window, qt_app):
+    """Stage 7: PDF entry points exist and the demo guide shows real step progress."""
+    image = load_plain_fixture(window, qt_app)
+    window.bridge.addManualDefect(image['id'], json.dumps({
+        'bbox': [300, 250, 700, 750], 'type': 'paint_loss', 'size': 'medium'}))
+    assert run_js(window, "Boolean(document.querySelector('[data-action=\"export-observation-card\"]')"
+                          " && document.querySelector('[data-action=\"export-repair-report\"]')"
+                          " && document.querySelector('[data-action=\"open-demo-guide\"]'))") is True
+    assert run_js(window, "document.querySelector('[data-action=\"open-demo-guide\"]').click(); true") is True
+    assert wait_until(qt_app, lambda: '校赛演示流程' in (run_js(window, "document.querySelector('#demo-modal').textContent") or ''), 10)
+    assert wait_until(qt_app, lambda: run_js(window, "document.querySelectorAll('#demo-steps .demo-step').length") == 7, 10)
+    text = run_js(window, "document.querySelector('#demo-steps').textContent")
+    for token in ('导入有明确许可的壁画图像', '本地 Qwen3-VL 识别疑似病害', 'DeepSeek 修复评估', '导出观察卡'):
+        assert token in text, token
+    assert '不会用预置结果冒充实时推理' in run_js(window, "document.querySelector('#demo-modal').textContent")
