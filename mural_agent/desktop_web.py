@@ -22,15 +22,40 @@ from . import backup, datasets, references, workspace
 from .config import ROOT, Settings, save_env_fields, valid_deepseek_key
 from .deepseek_vision import DeepSeekVisionProvider
 from .engine import Engine
-from .imaging import image_array, mask_array
+from .imaging import decode_image, image_array, mask_array
 from .qt_setup import configure_application
 from .segmentation import damage_proposal
 from .storage import Store, new_id, timestamp
-from .vision_analysis import cloud_defects, local_assessment
+from .vision_analysis import cloud_defects, detect_local, local_assessment, pixels_to_normalized
 
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+# Sizes quoted in the install hints match the pinned checkpoints recorded by
+# scripts/download_models.py (Qwen3-VL-2B weights and SAM 2.1 Hiera Tiny).
+QWEN_WEIGHTS = 'model.safetensors'
+SAM_WEIGHTS = 'model.safetensors'
+
+
+def local_model_setup(settings):
+    """Readiness of the local detector plus actionable install hints.
+
+    Readiness is decided by the checkpoint files the two workers actually load,
+    not by a provenance marker alone, so a half-finished download cannot be
+    mistaken for a usable model.
+    """
+    qwen_ready = (settings.vision_model / QWEN_WEIGHTS).is_file()
+    sam_ready = (settings.sam_model / SAM_WEIGHTS).is_file()
+    qwen_hint = '' if qwen_ready else (
+        '本地 Qwen3-VL 未安装：请把 Qwen3-VL-2B-Instruct 的 model.safetensors（约 4.27 GB）等文件放到 '
+        f'{settings.vision_model}，或运行 .\\scripts\\download_models.py vision。')
+    sam_hint = '' if sam_ready else (
+        'SAM 2.1 未安装：请把 sam2.1-hiera-tiny 的 model.safetensors（约 156 MB）放到 '
+        f'{settings.sam_model}，或运行 .\\scripts\\download_models.py sam2；缺少 SAM 时只保留候选框。')
+    return {'qwen_ready': qwen_ready, 'sam_ready': sam_ready,
+            'qwen_hint': qwen_hint, 'sam_hint': sam_hint}
 
 
 def select_full_generation_backend(available):
@@ -102,6 +127,127 @@ class Bridge(QObject):
             'fraction': float((mask > 0).mean()), 'metadata': metadata, 'confirmed': False})
         return {'proposal': proposal}
 
+    def _mask_overlay(self, array):
+        """RGBA canvas overlay: damaged pixels tinted, everything else transparent."""
+        import numpy as np
+        rgba = np.zeros((array.shape[0], array.shape[1], 4), dtype=np.uint8)
+        rgba[array > 0] = (214, 62, 44, 150)
+        from io import BytesIO
+        buffer = BytesIO()
+        Image.fromarray(rgba, 'RGBA').save(buffer, format='PNG')
+        return base64.b64encode(buffer.getvalue()).decode()
+
+    def _local_defect(self, proposal):
+        """One local-detection record in the shape the canvas and list expect."""
+        metadata = proposal.get('metadata') or {}
+        defect = {
+            'index': 0, 'type': metadata.get('type') or 'other',
+            'bbox': list(metadata.get('bbox') or []),
+            'bbox_pixels': list(metadata.get('bbox_pixels') or []),
+            'size': metadata.get('size') or 'uncertain',
+            'confidence': metadata.get('confidence'),
+            'evidence': metadata.get('evidence') or '',
+            'observation': metadata.get('observation') or metadata.get('evidence') or '',
+            'repair_suggestion': metadata.get('repair_suggestion') or '',
+            'uncertainty': metadata.get('uncertainty') or '',
+            'model_source': metadata.get('model_source') or 'Qwen3-VL local',
+            'risk_level': metadata.get('risk_level') or 'unknown',
+            'recommendation': metadata.get('recommendation') or {},
+            'mask_status': metadata.get('mask_status') or 'observation',
+            'mask_notice': metadata.get('mask_notice') or '',
+            'confirmed': bool(proposal.get('confirmed')),
+            'proposal_id': proposal['id'],
+        }
+        mask_path = self.store.folder(proposal['id']) / 'mask.png'
+        if mask_path.is_file():
+            defect['mask_file_url'] = self._file_url(mask_path)
+            defect['mask_overlay_data'] = self._mask_overlay(mask_array(mask_path))
+        return defect
+
+    def _persist_local_defects(self, image, entries):
+        """Store one reviewable proposal per detected candidate (never a job)."""
+        width, height = image['width'], image['height']
+        defects, proposals = [], []
+        for entry in entries:
+            candidate = entry['candidate']
+            identifier = new_id()
+            folder = self.store.folder(identifier)
+            if entry['mask'] is not None:
+                Image.fromarray(entry['mask']).save(folder / 'mask.png')
+            metadata = {
+                'type': candidate.type,
+                'bbox': pixels_to_normalized(candidate.bbox, width, height),
+                'bbox_pixels': list(candidate.bbox),
+                'size': entry.get('size') or 'uncertain',
+                'confidence': entry.get('confidence'),
+                'evidence': candidate.evidence,
+                'observation': candidate.observation,
+                'repair_suggestion': candidate.repair_suggestion,
+                'uncertainty': candidate.uncertainty,
+                'model_source': candidate.model_source,
+                'risk_level': candidate.risk_level,
+                'recommendation': entry.get('recommendation') or {},
+                'mask_status': entry['mask_status'],
+                'mask_notice': entry['mask_notice'],
+                'local_detection': True,
+                # Local candidate regions are suggestions; risk classification is
+                # intentionally left to the existing review gates.
+                'region_class': 'fillable_lacuna', 'risk_regions': [],
+                'risk_notice': entry['mask_notice'],
+            }
+            record = self.store.put('proposal', {
+                'id': identifier, 'image_id': image['id'], 'created_at': timestamp(),
+                'metadata': metadata, 'adopted': False, 'confirmed': False,
+                'mask_source': 'sam' if entry['mask_status'] == 'sam' else 'manual',
+                'region_class': 'fillable_lacuna', 'repair_allowed': True,
+                'fraction': round(float((entry['mask'] > 0).mean()), 6) if entry['mask'] is not None else 0.0,
+            })
+            proposals.append(record)
+            defects.append(self._local_defect(record))
+        for index, defect in enumerate(defects, 1):
+            defect['index'] = index
+        return defects, proposals
+
+    def _new_local_defect(self, image, payload):
+        """Create a user-drawn local defect (normalized 0..1000 box) as a proposal."""
+        import numpy as np
+        try:
+            bbox = [int(value) for value in payload.get('bbox') or []]
+        except (TypeError, ValueError) as exc:
+            raise ValueError('缺损框无效。') from exc
+        if len(bbox) != 4:
+            raise ValueError('缺损框无效。')
+        width, height = image['width'], image['height']
+        x0, y0, x1, y1 = [max(0, min(1000, value)) for value in bbox]
+        x0, x1 = min(x0, x1), max(x0, x1)
+        y0, y1 = min(y0, y1), max(y0, y1)
+        if x1 - x0 < 3 or y1 - y0 < 3:
+            raise ValueError('缺损框太小，请重新框选。')
+        px0, px1 = x0 * width // 1000, min(width, max(x0 * width // 1000 + 1, (x1 * width + 999) // 1000))
+        py0, py1 = y0 * height // 1000, min(height, max(y0 * height // 1000 + 1, (y1 * height + 999) // 1000))
+        array = np.zeros((height, width), dtype=np.uint8)
+        array[py0:py1, px0:px1] = 255
+        identifier = new_id()
+        Image.fromarray(array).save(self.store.folder(identifier) / 'mask.png')
+        kind = str(payload.get('type') or 'other')[:40]
+        from .damage_assessment import recommendation_for
+        metadata = {
+            'type': kind, 'bbox': [x0, y0, x1, y1], 'bbox_pixels': [px0, py0, px1, py1],
+            'size': str(payload.get('size') or 'manual')[:20],
+            'evidence': '人工新增或修正的缺损区域。',
+            'mask_status': 'manual', 'mask_notice': '人工确认的掩膜，需复核。',
+            'recommendation': recommendation_for({'type': kind, 'size': payload.get('size') or 'manual'}),
+            'model_source': 'manual', 'risk_level': 'unknown',
+            'local_detection': True, 'region_class': 'fillable_lacuna', 'risk_regions': [],
+            'risk_notice': '人工编辑，未做自动风险分类。',
+        }
+        record = self.store.put('proposal', {
+            'id': identifier, 'image_id': image['id'], 'created_at': timestamp(),
+            'metadata': metadata, 'adopted': False, 'confirmed': True,
+            'mask_source': 'manual', 'region_class': 'fillable_lacuna', 'repair_allowed': True,
+            'fraction': round(float(array.mean()), 6)})
+        return self._local_defect(record)
+
     def _snapshot(self):
         images = [self._image(item) for item in self.store.list('image')]
         if self.current_image_id is None and images:
@@ -111,6 +257,7 @@ class Bridge(QObject):
         availability = self.engine.tools.availability()
         return {'images': images, 'jobs': jobs, 'models': {**availability, 'vision': (self.settings.vision_model / 'provenance.json').exists(),
             'deepseek_vision': bool(self.settings.deepseek_api_key),
+            'local_detection_setup': local_model_setup(self.settings),
             'api_configured': self.settings.api_ready}, 'aux': self.aux, 'aux_version': self.aux_version,
             'api': {'kind': self.settings.api_kind, 'base_url': self.settings.api_base_url,
                     'model': self.settings.api_model, 'json_mode': self.settings.api_json_mode},
@@ -366,6 +513,9 @@ class Bridge(QObject):
                 'evidence': metadata['evidence'], 'recommendation': metadata['recommendation'],
                 'proposal_id': identifier, 'region_class': 'fillable_lacuna',
                 'repair_allowed': True, 'risk_notice': metadata['risk_notice'], 'confirmed': True,
+                'mask_status': 'manual', 'mask_notice': '人工框选的掩膜，需复核。',
+                'model_source': 'manual',
+                'mask_overlay_data': self._mask_overlay(array),
             }
             return {'proposal': proposal, 'defect': defect}
         return self._result(action)
@@ -592,9 +742,10 @@ class Bridge(QObject):
         def action():
             from .professional import WORKFLOW_PROFESSIONAL, normalize_workflow
 
-            # The original bare image-ID slot remains available for local Qwen workflows.
-            payload = json.loads(image_id) if image_id.lstrip().startswith('{') else {
-                'image_id': image_id, 'workflow': 'standard', 'provider': 'local'}
+            # The workbench always posts a JSON payload. A bare image ID keeps the
+            # older local autonomous workflow for callers that still use it.
+            legacy_auto = not image_id.lstrip().startswith('{')
+            payload = {'image_id': image_id, 'workflow': 'standard', 'provider': 'local'} if legacy_auto else json.loads(image_id)
             identifier = payload.get('image_id') or payload.get('id')
             image = self.store.get('image', identifier)
             if not image:
@@ -607,16 +758,47 @@ class Bridge(QObject):
                     raise ValueError('请在 API 设置保存 DeepSeek 密钥，或切换本地模型/手动圈选。')
                 workflow = WORKFLOW_PROFESSIONAL
             elif provider == 'local':
-                if not (self.settings.vision_model / 'provenance.json').exists():
-                    raise ValueError('本地 Qwen3-VL 权重未安装，可切换 DeepSeek 云端或手动圈选。')
                 workflow = normalize_workflow(payload.get('workflow', WORKFLOW_PROFESSIONAL))
+                if legacy_auto and not (self.settings.vision_model / 'provenance.json').exists():
+                    raise ValueError('本地 Qwen3-VL 权重未安装，可切换 DeepSeek 云端或手动圈选。')
             else:
                 raise ValueError('不支持的视觉分析来源。')
 
-            started = self._aux(lambda: analyze(image, provider, workflow, api_key),
-                                'AI 正在分析缺损与文化线索…', image_id=identifier)
             self.current_image_id = identifier
-            return started
+            if provider == 'local' and not legacy_auto:
+                return self._aux(lambda: analyze_local(image, workflow),
+                                 '本地 Qwen3-VL 识别缺损…', image_id=identifier)
+            return self._aux(lambda: analyze(image, provider, workflow, api_key),
+                             'AI 正在分析缺损与文化线索…', image_id=identifier)
+
+        def analyze_local(image, workflow):
+            from .auto_restore import context_instructions
+
+            setup = local_model_setup(self.settings)
+            if not setup['qwen_ready']:
+                # Never fall back to the cloud silently: report the missing model
+                # and keep the manual workflow available.
+                return {'auto': {'image_id': image['id'], 'assessment': None, 'mask': None, 'job': None,
+                                 'items': [], 'steps': [], 'defects': [], 'backend': '',
+                                 'summary': f'{setup["qwen_hint"]}仍可手动圈选缺损区域。',
+                                 'cultural_context': {}, 'planning_notes': '',
+                                 'workflow': workflow, 'awaiting_confirmation': False, 'proposals': []}}
+            assessment, entries = detect_local(self.store, self.engine, image)
+            defects, proposals = self._persist_local_defects(image, entries)
+            masked = sum(1 for entry in entries if entry['mask_status'] == 'sam')
+            if defects:
+                summary = (f'本地 Qwen3-VL 识别到 {len(defects)} 处疑似病害，其中 {masked} 处已由 SAM 2.1 '
+                           '生成掩膜候选；其余保留候选框，请逐项核对后确认。')
+            else:
+                summary = '本地 Qwen3-VL 未发现明确缺损；可手动圈选缺损区域。'
+            context = assessment.cultural_context.model_dump(mode='json') if assessment.cultural_context else {}
+            return {'auto': {'image_id': image['id'], 'assessment': assessment.model_dump(mode='json'),
+                             'mask': None, 'job': None, 'items': [], 'steps': [],
+                             'defects': defects, 'backend': '', 'summary': summary,
+                             'cultural_context': context,
+                             'planning_notes': context_instructions(context),
+                             'workflow': workflow, 'awaiting_confirmation': bool(defects),
+                             'proposals': proposals}}
 
         def analyze(image, provider, workflow, api_key):
             from .auto_restore import auto_restore, context_instructions
@@ -651,17 +833,117 @@ class Bridge(QObject):
         return self._result(action)
 
     @Slot(str, result=str)
+    def listLocalDefects(self, image_id):
+        """All persisted local defects of one image, in creation order."""
+        def action():
+            if not self.store.get('image', image_id):
+                raise ValueError('图像记录不存在。')
+            records = [proposal for proposal in self.store.list('proposal')
+                       if proposal.get('image_id') == image_id
+                       and (proposal.get('metadata') or {}).get('local_detection')]
+            records.sort(key=lambda proposal: proposal.get('created_at') or '')
+            defects = []
+            for index, record in enumerate(records, 1):
+                defect = self._local_defect(record)
+                defect['index'] = index
+                defects.append(defect)
+            return {'defects': defects}
+        return self._result(action)
+
+    @Slot(str, str, result=str)
+    def editLocalDefect(self, image_id, payload_json):
+        """Confirm, re-mask, re-box or delete one local defect."""
+        def action():
+            image = self.store.get('image', image_id)
+            if not image:
+                raise ValueError('图像记录不存在。')
+            payload = json.loads(payload_json or '{}')
+            action_name = payload.get('action')
+            if action_name == 'update' and not payload.get('proposal_id'):
+                return {'defect': self._new_local_defect(image, payload)}
+            proposal_id = payload.get('proposal_id')
+            if not proposal_id:
+                raise ValueError('缺少缺损项编号。')
+            proposal = self.store.get('proposal', proposal_id)
+            if not proposal:
+                raise ValueError('缺损项不存在。')
+            if proposal['image_id'] != image['id']:
+                raise ValueError('缺损项不属于当前图像。')
+            if action_name == 'remove':
+                self.store.delete('proposal', proposal_id)
+                return {'removed': True, 'proposal_id': proposal_id}
+            if action_name not in {'update', 'confirm'}:
+                raise ValueError('不支持的缺损编辑操作。')
+            metadata = dict(proposal.get('metadata') or {})
+            fraction = proposal.get('fraction')
+            mask_source = proposal.get('mask_source')
+            if action_name == 'update':
+                if payload.get('mask_data'):
+                    import numpy as np
+                    mask = decode_image(base64.b64decode(payload['mask_data'], validate=True), mask=True)
+                    if mask.size != (image['width'], image['height']):
+                        raise ValueError('掩膜尺寸必须与原图一致。')
+                    array = (np.asarray(mask) > 127).astype(np.uint8) * 255
+                    if not array.any():
+                        raise ValueError('掩膜不能为空，请先圈选要修复的像素。')
+                    Image.fromarray(array).save(self.store.folder(proposal_id) / 'mask.png')
+                    fraction = round(float(array.mean()), 6)
+                    mask_source = 'manual'
+                    metadata.update(mask_status='manual', mask_notice='人工修正的掩膜，需复核。')
+                if payload.get('bbox'):
+                    try:
+                        bbox = [int(value) for value in payload['bbox']]
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError('缺损框无效。') from exc
+                    if len(bbox) != 4:
+                        raise ValueError('缺损框无效。')
+                    x0, y0, x1, y1 = [max(0, min(1000, value)) for value in bbox]
+                    x0, x1 = min(x0, x1), max(x0, x1)
+                    y0, y1 = min(y0, y1), max(y0, y1)
+                    if x1 - x0 < 3 or y1 - y0 < 3:
+                        raise ValueError('缺损框太小，请重新框选。')
+                    width, height = image['width'], image['height']
+                    metadata['bbox'] = [x0, y0, x1, y1]
+                    metadata['bbox_pixels'] = [
+                        x0 * width // 1000, y0 * height // 1000,
+                        min(width, max(x0 * width // 1000 + 1, (x1 * width + 999) // 1000)),
+                        min(height, max(y0 * height // 1000 + 1, (y1 * height + 999) // 1000))]
+                if payload.get('type'):
+                    metadata['type'] = str(payload['type'])[:40]
+            proposal = self.store.update('proposal', proposal_id, metadata=metadata, confirmed=True,
+                                         fraction=fraction, mask_source=mask_source)
+            return {'defect': self._local_defect(proposal)}
+        return self._result(action)
+
+    @Slot(str, result=str)
     def runDefectRepairs(self, request_json):
         def action():
             request = json.loads(request_json)
             if self.aux_future and not self.aux_future.done():
                 raise ValueError('AI 分析仍在运行，请完成后再启动修复。')
+            image_id = request.get('image_id')
+            if not self.store.get('image', image_id):
+                raise ValueError('图像记录不存在。')
+            requested = list(dict.fromkeys(request.get('proposal_ids') or []))
+            confirmed_ids, skipped = [], []
+            for proposal_id in requested:
+                proposal = self.store.get('proposal', proposal_id)
+                if not proposal or proposal.get('image_id') != image_id:
+                    skipped.append({'proposal_id': proposal_id, 'reason': '缺损记录不存在或不属于当前图像'})
+                elif not proposal.get('confirmed'):
+                    skipped.append({'proposal_id': proposal_id, 'reason': '该缺损项尚未人工确认，请先在清单中确认'})
+                elif not (self.store.folder(proposal_id) / 'mask.png').is_file():
+                    skipped.append({'proposal_id': proposal_id, 'reason': '该缺损项还没有掩膜，请先手动圈选或修正掩膜'})
+                else:
+                    confirmed_ids.append(proposal_id)
+            if not confirmed_ids:
+                return {'jobs': [], 'skipped': skipped}
             from .defect_jobs import run_confirmed_defects
             result = run_confirmed_defects(
-                self.store, self.engine, request.get('image_id'),
-                request.get('proposal_ids'), request.get('methods'),
-                generative_attempt=bool(request.get('generative_attempt')))
+                self.store, self.engine, image_id, confirmed_ids,
+                request.get('methods'), generative_attempt=bool(request.get('generative_attempt')))
             result['jobs'] = [self._job(job) for job in result['jobs']]
+            result['skipped'] = skipped + list(result.get('skipped') or [])
             return result
         return self._result(action)
 

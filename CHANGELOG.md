@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-11-16 — 阶段 3：本地 Qwen3-VL + SAM 2.1 病害识别与掩膜候选
+
+- 分析来源默认改为**本地 Qwen3-VL**；DeepSeek 保留为可选来源，不再静默替代本地识别。
+- 新增 `vision_analysis.detect_local`：Qwen 候选框映射到原图像素；裂隙、起甲、颜料缺失再调用 SAM 2.1 分割；只有通过尺寸、非空、置信分、越框面积、越框范围的掩膜才标 `sam`，否则保留候选框并标 `needs_review`，要求人工修正。
+- 褪色、污染归为表面观察，不默认补洞；修复建议改走局部色调匹配。
+- 新增 `local_model_setup` 就绪检查：缺权重时提示所需文件与体积（Qwen 4.27 GB / SAM 156 MB），保留手动画选，不自动改走云端。
+- 画布新增候选框 + 半透明掩膜 + 区域编号 + 病害类型 + 来源模型叠加；缺损清单支持确认、删除、修改掩膜和手动画选。
+- 缺损项持久化为 proposal，新增 `editLocalDefect` / `listLocalDefects`；未确认或缺掩膜的条目拒绝启动修复任务（`Store.delete` 支持删除）。
+- 修复 Qwen 2B 实际按百分比输出坐标导致的定位错误：提示词改为百分比，解析层自动识别 0–100 并换算到 0–1000。
+- 真实推理跑通：RTX 4060 上 Qwen3-VL-2B + SAM 2.1 Hiera Tiny，6 个候选、4 个掩膜通过校验（越框比例 0.0–0.0161），整轮 187.83 秒；报告见 `artifacts/local-detection-verification.json`。
+- 测试 **154 项通过**（新增本地检测、坐标换算、掩膜越框、重复框/整图框、缺模型降级、缺损编辑与持久化回归）。
+
+
 ## 2026-11-09 — 云端全图重绘（Grok Imagine）
 
 - 移植可插拔云端图片编辑客户端 `mural_agent/imagine.py`（OpenAI 兼容 Images，默认 xAI `grok-imagine-image-2.0`）。

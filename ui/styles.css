@@ -227,6 +227,14 @@ textarea { resize: vertical; min-height: 66px; line-height: 1.5; }
 .triple-image img.hidden { display: none; }
 .triple-panel .button { margin-top: auto; font-size: 11px; }
 .damage-highlight.visible { display: block; }
+.damage-overlay { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+.damage-overlay.hidden { display: none; }
+.damage-region { position: absolute; border: 1.5px solid rgba(198, 52, 32, .95); border-radius: 2px; box-shadow: 0 0 0 1px rgba(255, 255, 255, .45); }
+.damage-region-label { position: absolute; top: -18px; left: -1px; padding: 1px 5px; border-radius: 3px; background: rgba(24, 22, 20, .82); color: #fff; font-size: 10px; line-height: 16px; white-space: nowrap; }
+.damage-region[data-mask-state="observation"] { border-style: dashed; border-color: rgba(46, 108, 168, .95); }
+.damage-mask-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.damage-status-line { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.damage-confirmed { color: #2f6b3a; }
 .canvas-wrap.damage-drawing #mask-canvas { cursor: crosshair; }
 .manual-repair-settings { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
 .manual-repair-settings summary { cursor: pointer; color: var(--muted); font-size: 11px; }

@@ -27,7 +27,7 @@ MIN_BOX_FRACTION = 0.0005    # a 0.05% box is almost certainly noise/text, not d
 MIN_MASK_FRACTION = 0.0005   # refuse to submit a repair that touches almost nothing
 STEP_LIMIT = 3
 LABELS = {'crack': '裂缝', 'paint_loss': '颜料层缺失', 'plaster_loss': '地仗/灰泥缺失',
-          'flaking': '起甲/剥落', 'stain': '污渍/变色', 'other': '其他疑似缺损'}
+          'flaking': '起甲/剥落', 'fading': '褪色', 'stain': '污渍/变色', 'other': '其他疑似缺损'}
 # Tie-breaking order when several tools receive the same weight.
 TOOL_ORDER = {'lama': 0, 'telea': 1, 'ns': 2, 'color': 3, 'denoise': 4, 'deblur': 5}
 

@@ -5,7 +5,7 @@
 ## 功能
 
 - 导入壁画图像，并用画笔或辅助分割工具选择待处理区域。
-- 使用 DeepSeek 云端（默认）或本地 Qwen3-VL 分析疑似缺损和可见文化线索。分析结果进入同一个缺损清单。
+- 使用本地 Qwen3-VL（默认）或 DeepSeek 云端分析疑似缺损和可见文化线索。本地流程会对裂隙、起甲/剥落和颜料缺失再调用 SAM 2.1 生成掩膜候选；褪色、污染只保留候选框。分析结果进入同一个缺损清单。
 - 点击清单条目可在主图定位；支持手动拖框添加缺损区域；每条缺损可选择建议方法或单独指定 LaMa、Telea、Navier–Stokes、局部色调匹配，再逐项或全部运行。
 - 可选实验性 AI 尝试性补全：允许大面积缺损走扩散生成，或让缺损清单直接生成；结果强制按假设归档，不作为历史定稿。
 - 三分屏对照：原图 / AI 大面积修补 / 全 AI 重绘，用于方案比较；后两栏均为推测性结果。
@@ -40,8 +40,8 @@ python -m venv .venv
 ## 使用
 
 1. 打开应用并载入一幅壁画图像。
-2. 默认选择 DeepSeek 云端。在“API 设置”的“DeepSeek 缺损分析”中填写密钥，点击“保存 DeepSeek 密钥”后即可分析。只在点击分析时发送当前图像的缩小副本。选择“本地模型”可使用已安装的 Qwen3-VL。
-3. 打开缺损清单，点击条目在主图定位。DeepSeek 的定位框是粗略建议，须手动圈选实际修补区域后才能运行对应条目。也可直接手动添加缺损。
+2. 默认选择本地模型（Qwen3-VL）。点击“AI 分析缺损与文化线索”后，本地 Qwen3-VL 给出候选框，SAM 2.1 对几何缺损生成掩膜候选；未安装权重时界面会提示所需文件，手动画选不受影响。切换到 DeepSeek 云端需在“API 设置”的“DeepSeek 缺损分析”中填写密钥；只在点击分析时发送当前图像的缩小副本。
+3. 打开缺损清单，点击条目在主图定位；候选框与半透明掩膜、区域编号、病害类型会同时显示。逐项确认、修改掩膜或删除后再运行；DeepSeek 的定位框是粗略建议，须手动圈选实际修补区域后才能运行对应条目。
 4. 逐项运行，或运行全部。
 5. 需要时打开“三分屏对照”，分别生成 AI 大面积修补和全 AI 图。
 5. 对比结果与差异，复核后保存图像或导出档案。
@@ -62,6 +62,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe scripts/verify_desktop.py
+.\.venv\Scripts\python.exe scripts/verify_local_detection.py
 ```
 
 测试包含本地业务逻辑、API 开发适配器和 Qt WebEngine 桌面桥接。CI（`.github/workflows/tests.yml`）在 Windows 上运行非 WebEngine 测试、`node --check` 与 `compileall`。完整依赖清单见 [requirements.txt](requirements.txt)、[requirements-models.txt](requirements-models.txt) 和 [requirements-dev.txt](requirements-dev.txt)。
