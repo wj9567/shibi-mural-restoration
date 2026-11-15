@@ -59,6 +59,8 @@
               <div class="comparison-toolbar"><select id="comparison-mode"><option value="compare">滑动对照</option><option value="result">修复结果</option><option value="difference">修改差异</option></select><span>原图</span><input id="compare-range" type="range" min="0" max="100" value="50"><span>候选</span><span id="candidate-device" class="muted"></span></div>
               <div id="comparison-stage" class="comparison-stage"><div class="empty-inline">选择候选查看结果</div></div>
               <div id="candidate-metrics" class="metrics-line">掩膜外像素保持不变；工程评分不代表历史真实性。</div>
+              <div class="ai-review-toolbar"><button class="button" data-action="assess-repair" id="assess-repair-button">AI 修复评估（DeepSeek）</button><input id="ai-review-context" maxlength="800" placeholder="可选：参考纹样、年代或背景信息（仅作为评估线索）"></div>
+              <section id="ai-review-panel" class="ai-review-panel hidden" aria-label="AI 修复评估"></section>
               <div class="review-row decision-row">
                 <span class="field-label">人工复核（硬门槛）</span>
                 <label class="check-row compact"><input type="radio" name="review-decision" value="adopt"><span>采纳</span></label>

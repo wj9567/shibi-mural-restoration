@@ -863,3 +863,32 @@ def test_region_repair_candidates_and_region_preview(window, qt_app):
     assert wait_until(qt_app, lambda: run_js(window, "(document.querySelector('#region-images img')?.naturalWidth || 0) > 0") is True, 10)
     assert run_js(window, "document.querySelector('[data-action=\"regenerate-region\"]').disabled") is False
     assert '重新生成此区域' in run_js(window, "document.querySelector('#region-panel').textContent")
+
+
+def test_ai_repair_review_panel_renders_advisory_fields(window, qt_app):
+    """Stage 5 UI: each region shows local evidence, candidate, advice, risk and review flag."""
+    load_plain_fixture(window, qt_app)
+    record = {
+        'id': 'assessment-1', 'image_id': 'fake', 'created_at': '2026-11-16T00:00:00+00:00',
+        'model_source': 'deepseek-flash', 'advisory': True, 'limitations': '模型只看到缩略图。',
+        'regions': [{
+            'index': 1, 'region_id': 'region-a', 'type': 'paint_loss', 'type_label': '颜料层缺失',
+            'bbox_0_1000': [100, 100, 300, 300], 'local_evidence': '局部颜料层缺失',
+            'local_mask_fraction': .031,
+            'candidate': {'tool': 'lama', 'method': 'LaMa 纹理补全', 'parameters': {'tool': 'lama'}},
+            'observation': '修复区域纹理连续', 'repair_suggestion': '建议降低补全强度',
+            'repair_assessment': '局部补全基本合理', 'basis': '对比修复前后边缘',
+            'risk_level': 'high', 'uncertainty': '缺少颜料资料',
+            'model_review_required': True, 'human_review_required': True,
+            'review_reason': '与人物面部重叠；模型判定为高风险',
+            'local_flags': ['修复区域与人物面部重叠，需专家核对'],
+        }],
+    }
+    assert run_js(window, "Boolean(document.querySelector('#assess-repair-button') && document.querySelector('#ai-review-context'))") is True
+    assert run_js(window, f"window.__shibui.renderAiReview({json.dumps(record)}); true") is True
+    panel = run_js(window, "document.querySelector('#ai-review-panel').textContent")
+    for token in ('颜料层缺失', '本地检测', 'LaMa 纹理补全', 'DeepSeek 观察', '修复评价',
+                  '判断依据', '需要人工复核', '与人物面部重叠', '不会修改掩膜、像素或审核状态'):
+        assert token in panel, token
+    assert run_js(window, "document.querySelectorAll('#ai-review-panel [data-ai-region]').length") == 1
+    assert run_js(window, "document.querySelector('#ai-review-panel .ai-region').classList.contains('needs-review')") is True

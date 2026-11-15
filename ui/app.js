@@ -7,6 +7,7 @@
     proposal: null, references: [], selectedReference: null, registration: null, lastSnapshot: null, toastTimer: null,
     auxVersion: -1, damageItems: [], damageSummary: '', selectedDamage: null, activeJobId: null, running: false, autoBusy: false,
     damageDrawMode: false, damageDraw: null, damageDrawTarget: null, damageJobKey: null, maskEditTarget: null,
+    aiAssessment: null,
     batchJobIds: [], defectSubmitting: false, triple: { largeJobId: null, fullJobId: null } };
   const canvas = $('#mask-canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -233,7 +234,7 @@
 
 
   function loadImage(record) {
-    clearDamageHighlight(); hideModal('damage-modal'); hideModal('triple-modal');
+    clearDamageHighlight(); hideModal('damage-modal'); hideModal('triple-modal'); resetAiReview();
     state.triple = { largeJobId: null, fullJobId: null };
     state.batchJobIds = [];
     renderBatchJobs([]);
@@ -601,6 +602,7 @@
     const job = (state.lastSnapshot?.jobs || []).find(item => item.id === identifier);
     if (!job || job.image_id !== state.image?.id) return;
     state.job = job; state.candidate = null;
+    resetAiReview();
     $('#review-note').value = job.review?.note || '';
     $('#archive-hypothesis').checked = Boolean(job.review?.archive_as_hypothesis || job.mode === 'speculative');
     $$('input[name="review-decision"]').forEach(input => { input.checked = input.value === job.review?.decision; });
@@ -635,8 +637,58 @@
     renderRegionPanel(job);
   }
 
-  function renderRegionPanel(job = state.job) {
-    const panel = $('#region-panel');
+  function renderAiReview(record) {
+    const panel = $('#ai-review-panel');
+    if (!panel) return;
+    const regions = record?.regions || [];
+    if (!record || !regions.length) {
+      panel.classList.add('hidden');
+      panel.innerHTML = '';
+      return;
+    }
+    const risks = { low: '低', medium: '中', high: '高', unknown: '待判断' };
+    panel.classList.remove('hidden');
+    panel.innerHTML = `<div class="ai-review-head"><strong>AI 修复评估（建议，不改变本地结果）</strong>`
+      + `<small>${escapeHtml(record.model_source || 'deepseek-flash')} · ${escapeHtml((record.created_at || '').slice(0, 16).replace('T', ' '))}</small></div>`
+      + regions.map(region => `<article class="ai-region ${region.human_review_required ? 'needs-review' : ''}" data-ai-region="${escapeHtml(region.region_id)}">`
+        + `<header><b>区域 ${region.index} · ${escapeHtml(region.type_label)}</b>`
+        + `<span class="ai-risk">风险 ${escapeHtml(risks[region.risk_level] || region.risk_level)}</span>`
+        + `${region.human_review_required ? '<span class="ai-flag">需要人工复核</span>' : '<span class="ai-flag ok">未标记必须复核</span>'}</header>`
+        + `<p><b>本地检测</b> ${escapeHtml(region.local_evidence || '未记录可观察依据')}</p>`
+        + `<p><b>本地修复</b> ${region.candidate
+          ? `${escapeHtml(region.candidate.method || region.candidate.tool)}${region.candidate.parameters?.tool ? ` · ${escapeHtml(region.candidate.parameters.tool)}` : ''}`
+          : '还没有本地修复候选'} · 掩膜占比 ${(Number(region.local_mask_fraction || 0) * 100).toFixed(2)}%</p>`
+        + `<p><b>DeepSeek 观察</b> ${escapeHtml(region.observation)}</p>`
+        + `<p><b>修复评价</b> ${escapeHtml(region.repair_assessment)}</p>`
+        + `<p><b>修复建议</b> ${escapeHtml(region.repair_suggestion)}</p>`
+        + `<p><b>判断依据</b> ${escapeHtml(region.basis)}</p>`
+        + `<p><b>不确定性</b> ${escapeHtml(region.uncertainty)}</p>`
+        + `<p class="ai-reason"><b>复核原因</b> ${escapeHtml(region.review_reason || '模型未给出原因')}</p>`
+        + `</article>`).join('')
+      + `<div class="notice">AI 评估仅为建议：不会修改掩膜、像素或审核状态。`
+      + `${record.limitations ? ` ${escapeHtml(record.limitations)}` : ''}</div>`;
+  }
+
+  async function assessRepair() {
+    if (!state.image || !state.job || !state.candidate) return toast('请先选择一个本地修复候选。');
+    if (!state.lastSnapshot?.models?.deepseek_vision) return toast('请先在 API 设置保存 DeepSeek 密钥。');
+    if (state.running || state.autoBusy) return toast('请等待当前任务完成后再评估。');
+    const panel = $('#ai-review-panel');
+    panel.classList.remove('hidden');
+    panel.innerHTML = '<div class="empty-inline">DeepSeek 正在评估本次修复结果…</div>';
+    try {
+      await invoke('assessRepair', JSON.stringify({
+        image_id: state.image.id, job_id: state.job.id, candidate_id: state.candidate.id,
+        context: $('#ai-review-context')?.value || '',
+      }));
+    } catch (error) {
+      panel.innerHTML = `<div class="ai-review-error">${escapeHtml(error.message || String(error))}</div>`
+        + '<div class="notice">本地修复结果与人工审核不受影响，可继续操作。</div>';
+      notifyError(error);
+    }
+  }
+
+  function renderRegionPanel(job = state.job) {    const panel = $('#region-panel');
     if (!panel) return;
     const candidate = state.candidate;
     const region = candidate?.region;
@@ -715,6 +767,13 @@
     $('#candidate-metrics').textContent = `${maskLabel}最大差异 ${metrics.outside_max_difference ?? '-'} · 边界色差 ${metrics.boundary_color_gap ?? '-'} · ${candidate.speculative ? '推测性内容需单独复核' : (candidate.enhanced || state.job?.mode === 'enhanced') ? '加强修复·选区附近纹理补全·非历史定稿' : '工程指标不代表历史真实性'}`;
     $('[data-action="select-candidate"]').disabled = ACTIVE.includes(state.job?.status);
     $('[data-action="select-candidate"]').textContent = jobSelected(candidate.id) ? '已选定候选' : '选定候选';
+    const assessButton = $('#assess-repair-button');
+    if (assessButton) {
+      assessButton.disabled = !state.lastSnapshot?.models?.deepseek_vision
+        || ACTIVE.includes(state.job?.status) || Boolean(state.autoBusy);
+      assessButton.title = state.lastSnapshot?.models?.deepseek_vision
+        ? '发送原图与本地修复图给 DeepSeek 评估，结果仅为建议' : '请先在 API 设置保存 DeepSeek 密钥';
+    }
     $('[data-action="save-result"]').disabled = false;
     $('[data-action="export-archive"]').disabled = !state.job?.selected_id;
   }
@@ -764,6 +823,14 @@
     if (aux.status === 'error') {
       $('#sam-status').textContent = '出错';
       $('#proposal-note').textContent = aux.error || '工具执行失败。';
+      if ((aux.label || '').includes('评估')) {
+        const panel = $('#ai-review-panel');
+        if (panel) {
+          panel.classList.remove('hidden');
+          panel.innerHTML = `<div class="ai-review-error">${escapeHtml(aux.error || 'AI 修复评估失败。')}</div>`
+            + '<div class="notice">本地修复结果与人工审核不受影响，可继续操作。</div>';
+        }
+      }
       if (state.autoBusy) {
         state.autoBusy = false;
         setAutoStatus(`AI 缺损分析失败：${aux.error || '未知错误'} 可切换来源或手动圈选。`);
@@ -772,6 +839,11 @@
       return;
     }
     const result = aux.result || {};
+    if (result.assessment) {
+      state.aiAssessment = result.assessment;
+      renderAiReview(result.assessment);
+      return;
+    }
     if (result.auto) {
       const auto = result.auto;
       if (auto.image_id && auto.image_id !== state.image?.id) return;
@@ -928,6 +1000,12 @@
     if (!overlay) return;
     overlay.classList.add('hidden');
     overlay.innerHTML = '';
+  }
+
+  function resetAiReview() {
+    state.aiAssessment = null;
+    const panel = $('#ai-review-panel');
+    if (panel) { panel.classList.add('hidden'); panel.innerHTML = ''; }
   }
 
   function renderTriple(jobs = state.lastSnapshot?.jobs || []) {
@@ -1188,6 +1266,7 @@
       hideModal('damage-modal');
       state.batchJobIds = jobs.map(job => job.id);
       state.job = jobs[0]; state.candidate = null;
+      resetAiReview();
       state.activeJobId = jobs.find(job => ACTIVE.includes(job.status))?.id || null;
       $('#review-note').value = '';
       $('#archive-hypothesis').checked = false;
@@ -1486,6 +1565,7 @@
           await generateRegionRepairs([state.job.defect_proposal_id]);
           break;
         }
+        case 'assess-repair': await assessRepair(); break;
         case 'cancel-job': { const identifier = state.activeJobId || state.job?.id; if (identifier) { await invoke('cancelJob', identifier); } await refresh(); break; }
         case 'resume-job': if (state.job) await invoke('resumeJob', state.job.id); await refresh(); break;
         case 'select-candidate': {
@@ -1754,5 +1834,5 @@
   // Test seam: the acceptance tests drive the same mask round-trip and job flow
   // through the shipped frontend instead of duplicating the logic in Python.
   window.__shibui = { state, loadImage, installMask, showMaskFromBase64, exportMaskBase64, refresh, renderDamage,
-    renderJob, renderRegionPanel, renderComparison, layoutComparison };
+    renderJob, renderRegionPanel, renderAiReview, renderComparison, layoutComparison };
 })();

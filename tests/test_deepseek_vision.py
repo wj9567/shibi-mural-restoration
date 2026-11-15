@@ -63,7 +63,8 @@ def test_chat_request_and_inverse_bbox_mapping(mock_http, caplog):
         assert MOCK_KEY.encode() not in request.content
         body = json.loads(request.content)
         assert body['model'] == 'deepseek-flash'
-        assert body['response_format'] == {'type': 'json_object'}
+        # The live API rejects json_object mode together with safety_check.
+        assert 'response_format' not in body
         assert body['safety_check'] == {'level': 'high'}
         message, = body['messages']
         assert message['role'] == 'user'
