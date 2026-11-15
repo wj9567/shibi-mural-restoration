@@ -167,7 +167,7 @@ def context_instructions(context):
     """Pass unverified visual context to the repair planner as cautious constraints."""
     if not isinstance(context, dict):
         return ''
-    lines = ['文化背景为 Qwen 视觉假设，未经文献或专家核实；不得作为历史事实。']
+    lines = ['文化背景为视觉模型的观察和假设，未经文献或专家核实。']
     for key, label in (('visible_subject', '可见题材'),
                        ('possible_period_or_tradition', '可能年代/传统（待核）')):
         value = str(context.get(key, '')).strip()
@@ -342,6 +342,7 @@ def propose_restore(store, engine, image_record, min_confidence=MIN_CONFIDENCE, 
         'steps': collected['steps'],
         'backend': collected['backend'],
         'summary': summary,
+        'limitations': collected['limitations'],
         'cultural_context': collected['cultural_context'],
         'planning_notes': collected['planning_notes'],
         'proposals': collected['proposals'],
@@ -385,5 +386,6 @@ def auto_restore(store, engine, image_record, min_confidence=MIN_CONFIDENCE, max
             'defects': collected['defects'],
             'routes': collected['accepted_routes'], 'steps': collected['steps'],
             'backend': collected['backend'], 'summary': summary,
+            'limitations': collected['limitations'],
             'cultural_context': collected['cultural_context'],
             'planning_notes': collected['planning_notes']}

@@ -19,12 +19,14 @@ from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from . import backup, datasets, references, workspace
-from .config import ROOT, Settings
+from .config import ROOT, Settings, save_env_fields, valid_deepseek_key
+from .deepseek_vision import DeepSeekVisionProvider
 from .engine import Engine
 from .imaging import image_array, mask_array
 from .qt_setup import configure_application
 from .segmentation import damage_proposal
 from .storage import Store, new_id, timestamp
+from .vision_analysis import cloud_defects, local_assessment
 
 
 def _json(value):
@@ -56,6 +58,7 @@ class Bridge(QObject):
         self.aux_future = None
         self.aux_version = 0
         self.current_image_id = None
+        self.cloud_analysis = None
 
     def _result(self, function):
         try:
@@ -107,6 +110,7 @@ class Bridge(QObject):
         jobs = [self._job(item) for item in self.store.list('job')]
         availability = self.engine.tools.availability()
         return {'images': images, 'jobs': jobs, 'models': {**availability, 'vision': (self.settings.vision_model / 'provenance.json').exists(),
+            'deepseek_vision': bool(self.settings.deepseek_api_key),
             'api_configured': self.settings.api_ready}, 'aux': self.aux, 'aux_version': self.aux_version,
             'api': {'kind': self.settings.api_kind, 'base_url': self.settings.api_base_url,
                     'model': self.settings.api_model, 'json_mode': self.settings.api_json_mode},
@@ -125,13 +129,15 @@ class Bridge(QObject):
         result['overlay_url'] = self._file_url(folder / 'overlay.png')
         return result
 
-    def _aux(self, function, label):
+    def _aux(self, function, label, *, image_id=None):
         if self.aux_future and not self.aux_future.done():
             raise ValueError('辅助工具仍在运行。')
         if any(job['status'] in {'queued', 'planning', 'running', 'evaluating'}
                for job in self.store.list('job')):
             raise ValueError('修复任务运行中，请完成或取消后再分析。')
         self.aux = {'status': 'running', 'label': label}
+        if image_id is not None:
+            self.aux['image_id'] = image_id
         self.aux_version += 1
         self.aux_future = self.aux_executor.submit(function)
         return {'status': 'running'}
@@ -139,9 +145,13 @@ class Bridge(QObject):
     def poll_aux(self):
         if self.aux_future and self.aux_future.done():
             future, self.aux_future = self.aux_future, None
+            image_id = self.aux.get('image_id')
             try:
                 self.aux = {'status': 'done', 'result': future.result()}
                 value = self.aux['result']
+                assessment = value.get('auto', {}).get('assessment')
+                if image_id is not None and assessment and assessment['source'] == 'deepseek':
+                    self.cloud_analysis = (image_id, assessment)
                 if value.get('proposal'):
                     url = self._file_url(self.store.folder(value['proposal']['id']) / 'mask.png')
                     value['proposal']['file_url'] = url
@@ -155,6 +165,8 @@ class Bridge(QObject):
                         item['file_url'] = self._file_url(self.store.folder(image['id']) / 'image.png')
             except Exception as exc:
                 self.aux = {'status': 'error', 'error': str(exc)[:500]}
+            if image_id is not None:
+                self.aux['image_id'] = image_id
             self.aux_version += 1
             self.auxCompleted.emit()
 
@@ -292,6 +304,14 @@ class Bridge(QObject):
             if not image:
                 raise ValueError('图像记录不存在。')
             payload = json.loads(payload_json or '{}')
+            candidate_id = payload.get('candidate_id')
+            candidate = None
+            if candidate_id is not None:
+                analysis_image_id, assessment = self.cloud_analysis or (None, None)
+                if analysis_image_id == image_id:
+                    candidate = next((item for item in assessment['items'] if item['candidate_id'] == candidate_id), None)
+                if candidate is None:
+                    raise ValueError('该候选不属于当前图像的 DeepSeek 分析，请重新分析或手动添加缺损。')
             try:
                 bbox = [int(value) for value in payload.get('bbox', [])]
             except (TypeError, ValueError) as exc:
@@ -322,7 +342,6 @@ class Bridge(QObject):
                 'type': str(payload.get('type') or 'manual')[:40],
                 'bbox': [x0, y0, x1, y1],
                 'size': str(payload.get('size') or 'manual')[:20],
-                'confidence': 1.0,
                 'evidence': '用户手动框选的缺损区域。',
                 'recommendation': {'method': 'Telea 局部纹理传播', 'backend': 'telea'},
                 'region_class': 'fillable_lacuna',
@@ -330,6 +349,11 @@ class Bridge(QObject):
                 'risk_notice': '手动添加，未做自动风险分类。',
                 'manual': True,
             }
+            if candidate:
+                from .damage_assessment import recommendation_for
+                metadata.update(type=candidate['type'], evidence=candidate['evidence'],
+                                recommendation=recommendation_for(candidate),
+                                vision_candidate=candidate, vision_image=assessment['image'])
             proposal = self.store.put('proposal', {
                 'id': identifier, 'image_id': image['id'], 'created_at': timestamp(),
                 'fraction': round(float(array.mean()), 6), 'metadata': metadata,
@@ -338,7 +362,7 @@ class Bridge(QObject):
             })
             defect = {
                 'index': 0, 'type': metadata['type'], 'bbox': metadata['bbox'],
-                'size': metadata['size'], 'confidence': 1.0,
+                'size': metadata['size'],
                 'evidence': metadata['evidence'], 'recommendation': metadata['recommendation'],
                 'proposal_id': identifier, 'region_class': 'fillable_lacuna',
                 'repair_allowed': True, 'risk_notice': metadata['risk_notice'], 'confirmed': True,
@@ -566,34 +590,56 @@ class Bridge(QObject):
     @Slot(str, result=str)
     def autoRestore(self, image_id):
         def action():
-            workflow = 'standard'
-            identifier = image_id
-            if isinstance(image_id, str) and image_id.strip().startswith('{'):
-                try:
-                    payload = json.loads(image_id)
-                    if isinstance(payload, dict):
-                        identifier = payload.get('image_id') or payload.get('id')
-                        workflow = payload.get('workflow', 'standard')
-                except json.JSONDecodeError:
-                    pass
+            from .professional import WORKFLOW_PROFESSIONAL, normalize_workflow
+
+            # The original bare image-ID slot remains available for local Qwen workflows.
+            payload = json.loads(image_id) if image_id.lstrip().startswith('{') else {
+                'image_id': image_id, 'workflow': 'standard', 'provider': 'local'}
+            identifier = payload.get('image_id') or payload.get('id')
             image = self.store.get('image', identifier)
             if not image:
                 raise ValueError('图像记录不存在。')
-            if not (self.settings.vision_model / 'provenance.json').exists():
-                raise ValueError('AI 分析缺损需要本地 Qwen3-VL 权重，请先安装模型。')
+            provider = payload.get('provider', 'deepseek')
+            api_key = ''
+            if provider == 'deepseek':
+                api_key = self.settings.deepseek_api_key
+                if not api_key:
+                    raise ValueError('请在 API 设置保存 DeepSeek 密钥，或切换本地模型/手动圈选。')
+                workflow = WORKFLOW_PROFESSIONAL
+            elif provider == 'local':
+                if not (self.settings.vision_model / 'provenance.json').exists():
+                    raise ValueError('本地 Qwen3-VL 权重未安装，可切换 DeepSeek 云端或手动圈选。')
+                workflow = normalize_workflow(payload.get('workflow', WORKFLOW_PROFESSIONAL))
+            else:
+                raise ValueError('不支持的视觉分析来源。')
+
+            started = self._aux(lambda: analyze(image, provider, workflow, api_key),
+                                'AI 正在分析缺损与文化线索…', image_id=identifier)
             self.current_image_id = identifier
-            from .auto_restore import auto_restore
-            from .professional import WORKFLOW_PROFESSIONAL, normalize_workflow
-            workflow = normalize_workflow(workflow)
-            busy = ('专业分步：仅识别候选选区供确认…'
-                    if workflow == WORKFLOW_PROFESSIONAL else 'AI 自主识别缺损并生成修复候选…')
-            # Rebind message for _aux by storing on closure via nonlocal pattern below.
-            result = auto_restore(self.store, self.engine, image, workflow=workflow)
+            return started
+
+        def analyze(image, provider, workflow, api_key):
+            from .auto_restore import auto_restore, context_instructions
+
+            if provider == 'deepseek':
+                with Image.open(self.store.folder(image['id']) / 'image.png') as source:
+                    assessment = DeepSeekVisionProvider(api_key).analyze(source)
+                defects = cloud_defects(assessment)
+                context = assessment.cultural_context.model_dump(mode='json') if assessment.cultural_context else {}
+                summary = (f'DeepSeek 给出 {len(defects)} 处疑似缺损。请核对原图并手动圈选后再修补。'
+                           if defects else 'DeepSeek 未发现明确缺损。请检查原图，可手动圈选。')
+                result = {'items': [], 'defects': defects, 'steps': [], 'backend': '', 'summary': summary,
+                          'cultural_context': context, 'planning_notes': context_instructions(context),
+                          'awaiting_confirmation': bool(defects)}
+            else:
+                result = auto_restore(self.store, self.engine, image, workflow=workflow)
+                assessment = local_assessment(self.store, image, result)
             mask = dict(result['mask']) if result.get('mask') else None
             if mask:
                 mask['file_url'] = self._file_url(self.store.folder(mask['id']) / 'mask.png')
             job = result.get('job')
-            return {'auto': {'mask': mask, 'job': self._job(job) if job else None,
+            return {'auto': {'image_id': image['id'], 'assessment': assessment.model_dump(mode='json'),
+                             'mask': mask, 'job': self._job(job) if job else None,
                              'items': result['items'], 'steps': result['steps'],
                              'defects': result.get('defects') or [],
                              'backend': result['backend'], 'summary': result['summary'],
@@ -601,16 +647,8 @@ class Bridge(QObject):
                              'planning_notes': result.get('planning_notes') or '',
                              'workflow': result.get('workflow', workflow),
                              'awaiting_confirmation': bool(result.get('awaiting_confirmation')),
-                             'proposals': result.get('proposals') or []},
-                    '_busy_message': busy}
-        def wrapped():
-            # _aux shows a fixed message; keep professional wording via notify after.
-            payload = action()
-            message = payload.pop('_busy_message', None)
-            if message and payload.get('auto', {}).get('awaiting_confirmation'):
-                self.notify.emit(payload['auto'].get('summary') or message)
-            return payload
-        return self._result(lambda: self._aux(wrapped, 'AI 正在分析缺损与文化线索…'))
+                             'proposals': result.get('proposals') or []}}
+        return self._result(action)
 
     @Slot(str, result=str)
     def runDefectRepairs(self, request_json):
@@ -773,6 +811,22 @@ class Bridge(QObject):
         return self._result(action)
 
     @Slot(str, result=str)
+    def saveDeepSeekKey(self, key):
+        def action():
+            normalized = key.strip()
+            if not normalized:
+                raise ValueError('请填写 DeepSeek API 密钥后再保存。')
+            if not valid_deepseek_key(normalized):
+                raise ValueError('DeepSeek API 密钥格式无效，请检查后重试。')
+            try:
+                save_env_fields({'DEEPSEEK_API_KEY': normalized})
+            except (OSError, UnicodeError):
+                raise ValueError('无法写入本机配置，请检查项目目录的写入权限及 .env 文件编码。') from None
+            self.settings.deepseek_api_key = normalized
+            return {'configured': True}
+        return self._result(action)
+
+    @Slot(str, result=str)
     def saveApiSettings(self, settings_json):
         def action():
             values = json.loads(settings_json)
@@ -792,13 +846,7 @@ class Bridge(QObject):
             if isinstance(imagine, dict):
                 from .imagine import imagine_env_updates
                 fields.update(imagine_env_updates(imagine))
-            if any('\n' in value or '\r' in value for value in fields.values()):
-                raise ValueError('配置不能包含换行。')
-            env_path = ROOT / '.env'
-            lines = env_path.read_text(encoding='utf-8-sig').splitlines() if env_path.exists() else []
-            lines = [line for line in lines if line.split('=', 1)[0].strip() not in fields]
-            lines.extend(name + '=' + value for name, value in fields.items())
-            env_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+            save_env_fields(fields)
             self.settings.api_kind, self.settings.api_base_url = kind, base
             self.settings.api_model, self.settings.api_json_mode = model, json_mode
             if key: self.settings.api_key = key

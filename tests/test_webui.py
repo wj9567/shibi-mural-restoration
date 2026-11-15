@@ -121,6 +121,53 @@ def test_settings_button_hit_area_does_not_cover_the_page(window, qt_app):
     run_js(window, "document.querySelector('#settings-modal').querySelector('[data-action=\"close-settings\"]').click(); true")
 
 
+def test_deepseek_key_can_be_saved_independently_from_settings_dialog(window, qt_app, tmp_path, monkeypatch):
+    from mural_agent import config
+    from mural_agent.deepseek_vision import DeepSeekVisionProvider
+    from mural_agent.vision_schema import VisionAssessment, VisionImage
+
+    key = 'mock-desktop-deepseek-settings-key'
+    env_path = tmp_path / '.env'
+    monkeypatch.setattr(config, 'ROOT', tmp_path)
+    calls = []
+
+    def analyze(provider, source):
+        calls.append(provider._api_key)
+        return VisionAssessment(source='deepseek', model_source='deepseek-flash',
+                                image=VisionImage.from_sizes(source.size, source.size), items=[])
+
+    monkeypatch.setattr(DeepSeekVisionProvider, 'analyze', analyze)
+    assert wait_until(qt_app, lambda: run_js(window, 'Boolean(window.__shibui?.state.bridge)'), 10)
+    open_settings = "document.querySelector('.topbar [data-action=\"open-settings\"]').click(); true"
+    assert run_js(window, open_settings) is True
+    assert run_js(window, "document.querySelector('#deepseek-api-key').type") == 'password'
+    assert run_js(window, "document.querySelector('#deepseek-api-key').value") == ''
+    assert run_js(window, f"""
+        document.querySelector('#api-base').value = 'invalid-vision-planner-url';
+        document.querySelector('#deepseek-api-key').value = {json.dumps(key)};
+        document.querySelector('[data-action="save-deepseek-key"]').click();
+        true
+    """) is True
+    assert wait_until(qt_app, lambda: window.bridge.settings.deepseek_api_key == key, 10)
+    assert wait_until(qt_app, lambda: run_js(window, "document.querySelector('#deepseek-api-key').value") == '', 10)
+    assert env_path.read_text(encoding='utf-8-sig').splitlines() == [f'DEEPSEEK_API_KEY={key}']
+    assert calls == []
+
+    run_js(window, "document.querySelector('#settings-modal [data-action=\"close-settings\"]').click(); true")
+    assert run_js(window, open_settings) is True
+    assert run_js(window, "document.querySelector('#deepseek-api-key').value") == ''
+    status = run_js(window, "document.querySelector('#deepseek-key-status').textContent")
+    assert '已配置' in status and key not in status
+    assert key not in window.bridge.snapshot()
+
+    run_js(window, "document.querySelector('#settings-modal [data-action=\"close-settings\"]').click(); true")
+    run_js(window, "document.querySelector('[data-action=\"load-demo\"]').click(); true")
+    assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('#auto-button').disabled"), 20)
+    run_js(window, "document.querySelector('#auto-button').click(); true")
+    assert wait_until(qt_app, lambda: run_js(window, "document.querySelector('#auto-status').textContent.includes('未发现')"), 20)
+    assert calls == [key]
+
+
 def test_grayscale_mask_round_trip_keeps_only_white_pixels(window, qt_app):
     mask = np.zeros((48, 64), dtype=np.uint8)
     mask[16:32, 24:40] = 255
@@ -252,6 +299,8 @@ def test_auto_analyze_button_shows_defect_list_without_submitting(window, qt_app
     assert run_js(window, "document.querySelector('[data-action=\"load-demo\"]').click(); true") is True
     assert wait_until(qt_app, lambda: run_js(window, 'Boolean(window.__shibui.state.image)') is True, 30)
     assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('[data-action=\"auto-restore\"]').disabled") is True, 15)
+    assert run_js(window, "document.querySelector('#vision-provider').value") == 'deepseek'
+    assert run_js(window, "document.querySelector('#vision-provider').value = 'local'; true") is True
     assert run_js(window, "document.querySelector('[data-action=\"auto-restore\"]').click(); true") is True
     assert wait_until(qt_app, lambda: json.loads(window.bridge.snapshot())['aux'].get('status') in {'done', 'error'}, 30)
     aux = json.loads(window.bridge.snapshot())['aux']
@@ -263,6 +312,88 @@ def test_auto_analyze_button_shows_defect_list_without_submitting(window, qt_app
     assert wait_until(qt_app, lambda: run_js(window, "document.querySelectorAll('.damage-item').length") >= 1, 20)
     assert run_js(window, "document.querySelector('#results-view').classList.contains('active')") is False
     assert json.loads(window.bridge.snapshot())['jobs'] == []
+
+
+def draw_defect_on_canvas(window):
+    return run_js(window, """(() => {
+      const c = document.querySelector('#mask-canvas');
+      const r = c.getBoundingClientRect();
+      const fire = (type, fx, fy, buttons) => c.dispatchEvent(new PointerEvent(type, {
+        bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse',
+        clientX: r.left + r.width * fx, clientY: r.top + r.height * fy,
+        button: 0, buttons }));
+      fire('pointerdown', 0.55, 0.55, 1);
+      fire('pointermove', 0.75, 0.75, 1);
+      fire('pointerup', 0.75, 0.75, 0);
+      return true;
+    })()""")
+
+
+def test_default_deepseek_defect_requires_a_hand_drawn_area(window, qt_app, monkeypatch):
+    from mural_agent.deepseek_vision import DeepSeekVisionProvider
+    from mural_agent.vision_schema import DefectCandidate, VisionAssessment, VisionImage
+
+    window.bridge.settings.deepseek_api_key = 'mock-desktop-key'
+    candidate = DefectCandidate(
+        candidate_id='fading-1', bbox=[500, 300, 650, 450], type='fading',
+        observation='色彩较浅 <img id="unsafe-vision-markup">', evidence='同色块的边界连续',
+        repair_suggestion='核对色差后复核', uncertainty='光照也会导致色差',
+        risk_level='medium', model_source='deepseek-flash',
+    )
+    calls = []
+
+    def analyze(provider, source):
+        calls.append(source.size)
+        return VisionAssessment(source='deepseek', model_source='deepseek-flash',
+                                image=VisionImage.from_sizes(source.size, source.size), items=[candidate])
+
+    monkeypatch.setattr(DeepSeekVisionProvider, 'analyze', analyze)
+    assert run_js(window, "document.querySelector('#vision-provider').value") == 'deepseek'
+    assert '缩小副本' in run_js(window, "document.querySelector('#vision-provider-note').textContent")
+    assert run_js(window, "document.querySelector('[data-action=\"load-demo\"]').click(); true") is True
+    assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('#auto-button').disabled && document.querySelector('#source-image').naturalWidth > 0"), 30)
+    assert calls == []
+    assert run_js(window, "document.querySelector('#auto-button').click(); true") is True
+    assert wait_until(qt_app, lambda: run_js(window, "Boolean(document.querySelector('[data-draw-defect]'))"), 20)
+    assert calls == [(960, 640)]
+    text = run_js(window, "document.querySelector('#damage-list').textContent")
+    assert 'deepseek-flash' in text and '褪色' in text and '光照也会导致色差' in text
+    assert '置信' not in text and '<img id=' in text
+    assert run_js(window, "Boolean(document.querySelector('#unsafe-vision-markup'))") is False
+    assert run_js(window, "document.querySelector('[data-action=\"run-all-defects\"]').disabled") is True
+    assert run_js(window, "Boolean(document.querySelector('[data-run-defect]'))") is False
+    assert not window.store.list('job') and not window.store.list('proposal')
+
+    assert run_js(window, "document.querySelector('[data-draw-defect]').click(); true") is True
+    assert draw_defect_on_canvas(window) is True
+    assert wait_until(qt_app, lambda: run_js(window, "Boolean(document.querySelector('[data-run-defect]'))"), 10)
+    rendered = json.loads(run_js(window, "JSON.stringify(window.__shibui.state.damageItems)"))
+    assert len(rendered) == 1
+    assert rendered[0]['bbox'] == [550, 550, 750, 750]
+    assert rendered[0]['bbox_pixels'] == [500, 300, 650, 450]
+    assert rendered[0]['candidate_id'] == candidate.candidate_id
+    assert run_js(window, "document.querySelector('[data-action=\"run-all-defects\"]').disabled") is False
+    assert not window.store.list('job')
+
+
+def test_empty_deepseek_result_preserves_manual_entry(window, qt_app, monkeypatch):
+    from mural_agent.deepseek_vision import DeepSeekVisionProvider
+    from mural_agent.vision_schema import VisionAssessment, VisionImage
+
+    window.bridge.settings.deepseek_api_key = 'mock-desktop-key'
+    monkeypatch.setattr(DeepSeekVisionProvider, 'analyze', lambda provider, source: VisionAssessment(
+        source='deepseek', model_source='deepseek-flash',
+        image=VisionImage.from_sizes(source.size, source.size), items=[],
+    ))
+    run_js(window, "document.querySelector('[data-action=\"load-demo\"]').click(); true")
+    assert wait_until(qt_app, lambda: run_js(window, "!document.querySelector('#auto-button').disabled"), 30)
+    run_js(window, "document.querySelector('#auto-button').click(); true")
+    assert wait_until(qt_app, lambda: run_js(window, "document.querySelector('#auto-status').textContent.includes('未发现')"), 20)
+    assert run_js(window, "document.querySelector('#damage-modal').classList.contains('hidden')") is True
+    run_js(window, "document.querySelector('[data-action=\"open-damage-list\"]').click(); true")
+    assert run_js(window, "document.querySelector('#damage-status').textContent") == '无候选'
+    assert not run_js(window, "document.querySelector('[data-action=\"add-manual-defect\"]').disabled")
+    assert not window.store.list('job') and not window.store.list('proposal')
 
 
 def test_damage_modal_and_manual_defect(window, qt_app):
@@ -297,19 +428,7 @@ def test_damage_modal_and_manual_defect(window, qt_app):
     # Draw a second defect directly through the DOM pointer handlers.
     assert run_js(window, "document.querySelector('[data-action=\"open-damage-list\"]').click(); true") is True
     assert run_js(window, "document.querySelector('[data-action=\"add-manual-defect\"]').click(); true") is True
-    drag = """(() => {
-      const c = document.querySelector('#mask-canvas');
-      const r = c.getBoundingClientRect();
-      const fire = (type, fx, fy, buttons) => c.dispatchEvent(new PointerEvent(type, {
-        bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse',
-        clientX: r.left + r.width * fx, clientY: r.top + r.height * fy,
-        button: 0, buttons }));
-      fire('pointerdown', 0.55, 0.55, 1);
-      fire('pointermove', 0.75, 0.75, 1);
-      fire('pointerup', 0.75, 0.75, 0);
-      return true;
-    })()"""
-    assert run_js(window, drag) is True
+    assert draw_defect_on_canvas(window) is True
     assert wait_until(qt_app, lambda: run_js(window, 'window.__shibui.state.damageItems.length') == 2, 10)
     assert run_js(window, "!document.querySelector('#damage-modal').classList.contains('hidden')") is True
     assert len(window.bridge.store.list('proposal')) == 2
@@ -332,7 +451,8 @@ def test_damage_panel_renders_candidates_and_recommendation(window, qt_app):
       state.image = {id: 'fake-image', width: 960, height: 640};
       state.damageItems = [{index: 1, type: 'crack', bbox: [100, 100, 200, 800], size: 'large',
         confidence: 0.9, evidence: 'demo', recommendation: {method: 'LaMa 纹理补全'}}];
-      window.__shibui.renderDamage('模型输出仅为候选');
+      state.damageSummary = '模型输出仅为候选';
+      window.__shibui.renderDamage();
       return JSON.stringify({count: document.querySelectorAll('.damage-item').length,
                              note: document.querySelector('#damage-note').textContent});
     })()"""
