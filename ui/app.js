@@ -5,7 +5,8 @@
   const state = { bridge: null, image: null, job: null, candidate: null, keepEmpty: false, maskStrokes: [], regionStrokes: [], strokeOrder: [], currentStroke: null,
     baseMask: null, maskDirty: false, tool: 'brush', brushSize: 28, zoom: 1, promptPoints: [], promptLabels: [], promptBox: null,
     proposal: null, references: [], selectedReference: null, registration: null, lastSnapshot: null, toastTimer: null,
-    auxVersion: -1, damageItems: [], selectedDamage: null, activeJobId: null, running: false, autoBusy: false, damageDrawMode: false, damageDraw: null, damageJobKey: null,
+    auxVersion: -1, damageItems: [], damageSummary: '', selectedDamage: null, activeJobId: null, running: false, autoBusy: false,
+    damageDrawMode: false, damageDraw: null, damageDrawTarget: null, damageJobKey: null,
     batchJobIds: [], defectSubmitting: false, triple: { largeJobId: null, fullJobId: null } };
   const canvas = $('#mask-canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -50,8 +51,7 @@
     return false;
   };
   const notifyError = (error) => toast(error?.message || String(error));
-  const AUTO_HINT = '由本地 Qwen 自动识别缺损、生成掩膜并规划保守修复；结果仍需人工复核。';
-  const AUTO_HINT_PRO = 'AI 会列出疑似缺损。核对选区、选择修补方案，再逐项或批量运行。';
+  const AUTO_HINT = '分析结果须人工核对。';
   const isProfessional = () => Boolean($('#professional-step')?.checked);
   const currentWorkflow = () => (isProfessional() ? 'professional_step' : 'standard');
   const isRegionTool = (tool) => tool === 'uncertain' || tool === 'uncertainty' || tool === 'unrestorable';
@@ -74,9 +74,15 @@
     return node ? node.value : '';
   };
 
-  const setAutoStatus = (text) => {
-    const fallback = isProfessional() ? AUTO_HINT_PRO : AUTO_HINT;
-    $('#auto-status').textContent = text || fallback;
+  const setAutoStatus = (text) => { $('#auto-status').textContent = text || AUTO_HINT; };
+  const renderVisionProviderNote = (models = state.lastSnapshot?.models || {}) => {
+    const note = $('#vision-provider-note');
+    if ($('#vision-provider').value === 'local') {
+      note.textContent = models.vision ? '使用本机 Qwen3-VL 分析图像。' : '本地分析需要已安装 Qwen3-VL。';
+    } else {
+      note.textContent = '点击分析会向 DeepSeek 发送当前图像的缩小副本。'
+        + (models.deepseek_vision === false ? '请先在“API 设置”保存 DeepSeek 密钥。' : '');
+    }
   };
   const syncRegionUi = () => {
     const on = isProfessional();
@@ -87,13 +93,12 @@
     const reason = $('#force-override-reason');
     if (reason) reason.classList.toggle('hidden', !(showForce && $('#force-override')?.checked));
     const runBtn = $('[data-action="run-repair"]');
-    if (runBtn) runBtn.disabled = state.running || !state.image || !maskHasPixels() || (on && regions.unrestorable);
+    if (runBtn) runBtn.disabled = state.running || state.autoBusy || !state.image || !maskHasPixels() || (on && regions.unrestorable);
   };
   const syncProfessionalUi = () => {
     const on = isProfessional();
     const autoBtn = $('[data-action="auto-restore"]');
     if (autoBtn) autoBtn.textContent = 'AI 分析缺损与文化线索';
-    setAutoStatus();
     const note = $('#professional-note');
     if (note) note.style.opacity = on ? '1' : '.72';
     const mode = $('#repair-mode')?.value || 'conservative';
@@ -227,7 +232,8 @@
     state.batchJobIds = [];
     renderBatchJobs([]);
     regionClassCtx.clearRect(0, 0, regionClasses.width, regionClasses.height);
-    state.damageDrawMode = false; state.damageDraw = null;
+    state.damageDrawMode = false; state.damageDraw = null; state.damageDrawTarget = null;
+    state.damageSummary = '';
     $('#canvas-wrap')?.classList.remove('damage-drawing');
     if (!record) {
       state.keepEmpty = true;
@@ -484,7 +490,9 @@
       const activeJob = ACTIVE.includes(state.job?.status) ? state.job : (snapshot.jobs || []).find(job => ACTIVE.includes(job.status));
       state.activeJobId = activeJob?.id || null;
       setBusy(Boolean(activeJob) || state.defectSubmitting);
-      $('[data-action="auto-restore"]').disabled = state.running || state.autoBusy || !state.image;
+      const visionBusy = snapshot.aux?.status === 'running' && (snapshot.aux.label || '').includes('AI 正在分析');
+      $('[data-action="auto-restore"]').disabled = state.running || state.autoBusy || visionBusy || !state.image;
+      $('#vision-provider').disabled = state.autoBusy || visionBusy;
       renderJob(state.job);
       syncRegionUi();
       renderBatchJobs(snapshot.jobs || []);
@@ -504,6 +512,8 @@
   }
 
   function renderModels(models) {
+    renderVisionProviderNote(models);
+    renderDeepSeekKeyStatus(models.deepseek_vision);
     ['allow-generative-attempt', 'damage-generative'].forEach(id => {
       const node = $('#' + id);
       if (node) {
@@ -715,6 +725,7 @@
 
   async function renderAux(aux) {
     if (!aux || aux.status === 'idle') return;
+    if (aux.image_id && aux.image_id !== state.image?.id) return;
     if (aux.status === 'running') {
       $('#sam-status').textContent = aux.label || '处理中';
       if (/缺损/.test(aux.label || '')) $('#damage-status').textContent = '识别中';
@@ -726,24 +737,27 @@
       $('#proposal-note').textContent = aux.error || '工具执行失败。';
       if (state.autoBusy) {
         state.autoBusy = false;
-        setAutoStatus('AI 缺损分析失败：' + (aux.error || '未知错误'));
+        setAutoStatus(`AI 缺损分析失败：${aux.error || '未知错误'} 可切换来源或手动圈选。`);
       }
       toast(aux.error || '辅助工具执行失败。');
       return;
     }
     const result = aux.result || {};
     if (result.auto) {
-      state.autoBusy = false;
       const auto = result.auto;
+      if (auto.image_id && auto.image_id !== state.image?.id) return;
+      state.autoBusy = false;
+      clearDamageHighlight();
       state.damageItems = auto.defects || [];
+      const hasDefects = state.damageItems.length > 0;
+      state.damageSummary = auto.summary || (hasDefects ? 'AI 分析完成，请人工核对缺损清单。' : '未发现明确缺损，可手动圈选。');
       state.selectedDamage = null;
       state.job = null;
       state.candidate = null;
       state.proposalIds = [];
-      renderDamage(auto.summary || '');
-      if (state.damageItems.length) showModal('damage-modal');
-      $('#damage-status').textContent = state.damageItems.length ? `识别 ${state.damageItems.length} 项` : '无候选';
-      setAutoStatus(auto.summary || 'AI 分析完成，请人工核对缺损清单。');
+      renderDamage();
+      if (hasDefects) showModal('damage-modal');
+      setAutoStatus(state.damageSummary);
       $('#repair-mode').value = 'conservative';
       if (auto.backend) $('#repair-backend').value = auto.backend;
       $('#planner').value = state.lastSnapshot?.models?.vision ? 'local' : 'rules';
@@ -761,15 +775,16 @@
       $('[data-action="select-candidate"]').disabled = true;
       $('[data-action="export-archive"]').disabled = true;
       showPage('workbench'); showView('edit');
-      toast('AI 已生成待确认选区与文化观察；请核对后再生成修复候选。');
+      toast(hasDefects ? 'AI 已列出疑似缺损，请核对后再修复。' : '未发现明确缺损，可手动圈选。');
       await refresh();
       return;
     }
     if (result.items) {
       state.autoBusy = false;
       state.damageItems = result.items;
+      state.damageSummary = result.limitations || '';
       state.selectedDamage = null;
-      renderDamage(result.limitations || '');
+      renderDamage();
       $('#damage-status').textContent = result.items.length ? `待确认 ${result.items.length} 项` : '未发现候选';
       toast(result.items.length ? `AI 提出 ${result.items.length} 个疑似缺损，请人工核验。` : 'AI 未发现候选，请人工检查原图。');
       return;
@@ -796,7 +811,9 @@
     if (result.notice) toast(result.notice);
   }
 
-  const DAMAGE_LABELS = { crack: '裂缝', paint_loss: '颜料层缺失', plaster_loss: '地仗/灰泥缺失', flaking: '起甲/剥落', stain: '污渍/变色', other: '其他疑似缺损', manual: '手动标注缺损' };
+  const DAMAGE_LABELS = { crack: '裂隙', paint_loss: '剥落 / 颜料层缺失', plaster_loss: '地仗/灰泥缺失', flaking: '起甲/剥落', fading: '褪色', stain: '污染 / 污渍', other: '其他疑似缺损', manual: '手动标注缺损' };
+  const DAMAGE_RISKS = { low: '低', medium: '中', high: '高', unknown: '待判断' };
+  const needsManualSelection = (item) => item.requires_manual_selection && !item.proposal_id;
 
   function renderCulturalContext(context) {
     const panel = $('#culture-summary');
@@ -807,12 +824,13 @@
     if (context.visual_clues?.length) lines.push(`<p><b>图像线索</b> ${escapeHtml(context.visual_clues.join('；'))}</p>`);
     if (context.preservation_constraints?.length) lines.push(`<p><b>保护约束</b> ${escapeHtml(context.preservation_constraints.join('；'))}</p>`);
     if (context.verification_needed?.length) lines.push(`<p><b>待查来源</b> ${escapeHtml(context.verification_needed.join('；'))}</p>`);
-    panel.innerHTML = `<strong>文化背景观察 · 未经考证</strong>${lines.join('') || '<p>AI 未能可靠判断，请结合馆藏记录或专家意见核实。</p>'}<small>修复规划会参考这些观察线索，但不会将模型猜测当成史实。</small>`;
+    panel.innerHTML = `<strong>文化背景观察 · 未经考证</strong>${lines.join('') || '<p>AI 未能可靠判断。</p>'}<small>如需作为修复依据，请先结合馆藏记录或专家意见核实。</small>`;
     panel.classList.remove('hidden');
   }
 
   function damageRecommendation(item) {
     if (item.recommendation?.method) return item.recommendation.method;
+    if (item.requires_manual_selection) return '先人工确认，再选择保守修补';
     const size = item.size || 'uncertain';
     if (item.type === 'stain') return '局部色调匹配';
     if (item.type === 'crack') return size === 'large' ? 'LaMa 候选；长裂缝需人工复核' : 'Navier–Stokes 细线修补';
@@ -926,7 +944,7 @@
   function openDamageModal() {
     if (!state.image) return toast('请先打开一幅壁画。');
     if (state.damageDrawMode) {
-      state.damageDrawMode = false; state.damageDraw = null;
+      state.damageDrawMode = false; state.damageDraw = null; state.damageDrawTarget = null;
       $('#canvas-wrap')?.classList.remove('damage-drawing');
       clearDamageHighlight();
     }
@@ -934,18 +952,18 @@
     showModal('damage-modal');
   }
 
-  function renderDamage(limitations = '') {
+  function renderDamage() {
     const list = $('#damage-list');
     if (!list) return;
     const count = state.damageItems.length;
     const status = $('#damage-status');
-    if (status) status.textContent = count ? `共 ${count} 项` : '待分析';
+    if (status) status.textContent = count ? `共 ${count} 项` : (state.damageSummary ? '无候选' : '待分析');
     const badge = $('#damage-count');
     if (badge) badge.textContent = String(count);
     const runAll = $('[data-action="run-all-defects"]');
     if (!state.image || !count) {
-      list.innerHTML = '<div class="empty-inline">点“AI 分析缺损”生成清单，或点“手动添加缺损区域”框选。</div>';
-      $('#damage-note').textContent = limitations || '所有缺损都可以尝试修复；结果不满意可以重跑。';
+      list.innerHTML = '<div class="empty-inline">点击“手动添加缺损区域”可在图上框选。</div>';
+      $('#damage-note').textContent = state.damageSummary || '点击“AI 分析缺损与文化线索”可生成缺损清单。';
       $('#damage-image').classList.add('hidden'); $('#damage-empty').classList.remove('hidden');
       if (runAll) runAll.disabled = true;
       return;
@@ -956,19 +974,24 @@
     list.innerHTML = state.damageItems.map((item, index) => {
       const [x0, y0, x1, y1] = item.bbox || [0, 0, 0, 0];
       const extent = Math.max(0, (x1 - x0) * (y1 - y0)) / 100;
-      const job = jobs.find(record => record.defect_proposal_id === item.proposal_id);
+      const job = item.proposal_id && jobs.find(record => record.defect_proposal_id === item.proposal_id);
       const statusText = job ? `任务${['review', 'completed'].includes(job.status) ? '已完成' : job.status === 'failed' ? '失败' : '进行中'}` : '';
       const method = item.recommendation?.method || damageRecommendation(item);
       const selectedMethod = item.selectedMethod || 'recommended';
       const alreadyQueued = job && ACTIVE.includes(job.status);
-      const busy = state.running || state.autoBusy;
       const disabled = alreadyQueued || busy;
-      const hint = item.risk_notice
-        ? `风险提示（不会阻止运行）：${item.risk_notice}`
-        : (!item.proposal_id ? '暂无可用掩膜，运行时会按框自动生成矩形掩膜。' : '');
+      const pending = needsManualSelection(item);
+      const hint = pending ? '模型框仅用于定位。请核对图像后手动框选。'
+        : (item.risk_notice || (!item.proposal_id ? '暂无掩膜，运行时会按框生成矩形掩膜。' : ''));
+      const details = [item.size, `框选约 ${extent.toFixed(2)}%`,
+        Number.isFinite(item.confidence) ? `置信 ${Math.round(item.confidence * 100)}%` : '',
+        item.model_source, item.risk_level ? `风险 ${DAMAGE_RISKS[item.risk_level] || '待判断'}` : ''].filter(Boolean);
+      const observations = [['可观察现象', item.observation], ['依据', item.evidence],
+        ['模型修复建议', item.repair_suggestion], ['不确定性', item.uncertainty]]
+        .filter(([, value]) => value).map(([label, value]) => `<small>${label}：${escapeHtml(value)}</small>`).join('');
       return `<div class="damage-item ${item === state.selectedDamage ? 'selected' : ''}" data-damage-row="${index}">` +
         `<div class="damage-item-main"><button class="damage-select" data-damage="${index}">${String(index + 1).padStart(2, '0')} ${escapeHtml(DAMAGE_LABELS[item.type] || '其他疑似缺损')}</button>` +
-        `<small>${escapeHtml(item.size || 'manual')} · 框选约 ${extent.toFixed(2)}% · 置信 ${Math.round((item.confidence || 0) * 100)}%</small>` +
+        `<small>${escapeHtml(details.join(' · '))}</small>${observations}` +
         `<small>建议：${escapeHtml(method)}</small><label class="damage-method">修补方案 <select data-method-defect="${index}" ${disabled || generative ? 'disabled' : ''}>` +
         `<option value="recommended" ${selectedMethod === 'recommended' ? 'selected' : ''}>采用建议</option>` +
         `<option value="lama" ${selectedMethod === 'lama' ? 'selected' : ''} ${state.lastSnapshot?.models?.lama ? '' : 'disabled'}>LaMa AI 纹理补全${state.lastSnapshot?.models?.lama ? '' : '（未安装，将回退 Telea）'}</option>` +
@@ -976,21 +999,27 @@
         `<option value="ns" ${selectedMethod === 'ns' ? 'selected' : ''}>Navier–Stokes 细线修补</option>` +
         `<option value="color" ${selectedMethod === 'color' ? 'selected' : ''}>局部色调匹配</option></select></label>` +
         `${hint ? `<small>${escapeHtml(hint)}</small>` : ''}${statusText ? `<small>${statusText}</small>` : ''}</div>` +
-        `<div class="damage-item-actions"><button class="button" data-run-defect="${index}" ${disabled ? 'disabled' : ''}>运行修复</button></div></div>`;
+        `<div class="damage-item-actions">${pending
+          ? `<button class="button" data-draw-defect="${index}" ${disabled ? 'disabled' : ''}>手动框选此候选</button>`
+          : `<button class="button" data-run-defect="${index}" ${disabled ? 'disabled' : ''}>运行修复</button>`}</div></div>`;
     }).join('');
     $$('[data-damage]').forEach(button => button.addEventListener('click', () => selectDamage(Number(button.dataset.damage))));
     $$('[data-method-defect]').forEach(select => select.addEventListener('change', () => {
       state.damageItems[Number(select.dataset.methodDefect)].selectedMethod = select.value;
     }));
     $$('[data-run-defect]').forEach(button => button.addEventListener('click', () => runDefectRepairs([Number(button.dataset.runDefect)]).catch(notifyError)));
+    $$('[data-draw-defect]').forEach(button => button.addEventListener('click', () => beginManualDamage(state.damageItems[Number(button.dataset.drawDefect)])));
     const generativeToggle = $('#damage-generative');
-    if (generativeToggle) generativeToggle.onchange = () => renderDamage(limitations);
+    if (generativeToggle) generativeToggle.onchange = () => renderDamage();
     const first = state.damageItems[0];
-    $('#damage-note').textContent = generative
+    const notice = generative
       ? 'AI 生成式补全（实验）：每项会用扩散模型按框直接生成，结果是推测，只能按假设归档；可能修坏，可重跑。'
-      : `${limitations || ''} 首项建议：${damageRecommendation(first)}。所有项都可以尝试修复，结果不满意可重跑。`;
+      : `${state.damageSummary} 首项建议：${damageRecommendation(first)}。`;
+    const pendingCount = state.damageItems.filter(needsManualSelection).length;
+    $('#damage-note').textContent = notice + (pendingCount ? ` ${pendingCount} 项待手动框选，批量运行会跳过这些项。` : '');
     if (runAll) {
-      runAll.disabled = busy || !state.damageItems.some(item => !jobs.some(job => job.defect_proposal_id === item.proposal_id && ACTIVE.includes(job.status)));
+      runAll.disabled = busy || !state.damageItems.some(item => !needsManualSelection(item)
+        && (!item.proposal_id || !jobs.some(job => job.defect_proposal_id === item.proposal_id && ACTIVE.includes(job.status))));
     }
   }
 
@@ -1001,8 +1030,10 @@
     if (generativeAttempt && !state.lastSnapshot?.models?.diffusion) {
       return toast('AI 生成式补全需要已安装扩散模型（models/sd-inpainting）。');
     }
-    const selected = indexes.map(index => state.damageItems[index]).filter(Boolean);
-    if (!selected.length) return toast('没有可运行的缺损项。');
+    const requested = indexes.map(index => state.damageItems[index]).filter(Boolean);
+    const selected = requested.filter(item => !needsManualSelection(item));
+    const pendingCount = requested.length - selected.length;
+    if (!selected.length) return toast(pendingCount ? '请手动框选 DeepSeek 候选后再运行。' : '没有可运行的缺损项。');
     state.defectSubmitting = true;
     setBusy(true);
     renderDamage();
@@ -1053,7 +1084,8 @@
       renderJob(state.job); renderBatchJobs(result.jobs);
       await installMask(state.job.mask_file_url, state.job.id);
       const skipped = result.skipped?.length ? `；跳过 ${result.skipped.length} 项：${result.skipped[0].reason}` : '';
-      toast(`已启动 ${count} 个修复任务${skipped}。`);
+      const pending = pendingCount ? `；${pendingCount} 项尚待手动框选` : '';
+      toast(`已启动 ${count} 个修复任务${skipped}${pending}。`);
     } finally {
       state.defectSubmitting = false;
       await refresh();
@@ -1070,6 +1102,7 @@
     hideModal('damage-modal');
     showPage('workbench'); showView('edit');
     toast(`已框出第 ${index + 1} 项；再次打开“缺损清单”可继续操作。`);
+    if (needsManualSelection(item)) return;
     try {
       const preview = await invoke('damagePreview', state.image.id, JSON.stringify(item));
       if (preview?.file_url) {
@@ -1079,15 +1112,22 @@
     } catch (error) { console.warn(error); }
   }
 
-  function beginManualDamage() {
+  function beginManualDamage(candidate = null) {
     if (!state.image) return toast('请先打开一幅壁画。');
     if (state.running || state.autoBusy) return toast('请等待当前修复或 AI 分析完成。');
     hideModal('damage-modal');
     state.damageDrawMode = true;
     state.damageDraw = null;
+    state.damageDrawTarget = candidate;
+    if (candidate) {
+      state.selectedDamage = candidate;
+      showDamageHighlight(candidate);
+    } else {
+      clearDamageHighlight();
+    }
     showPage('workbench'); showView('edit');
     $('#canvas-wrap').classList.add('damage-drawing');
-    toast('在图像上拖动框选缺损区域；按 Esc 取消。');
+    toast(candidate ? '请核对候选位置，在图像上拖出实际修复范围。按 Esc 取消。' : '在图像上拖动框选缺损区域；按 Esc 取消。');
   }
 
   function updateDamageDraft() {
@@ -1106,8 +1146,11 @@
   async function finishDamageDraw() {
     const drawing = state.damageDraw;
     if (!drawing || !state.image) return;
+    const imageId = state.image.id;
+    const target = state.damageDrawTarget;
     state.damageDraw = null;
     state.damageDrawMode = false;
+    state.damageDrawTarget = null;
     $('#canvas-wrap').classList.remove('damage-drawing');
     const x0 = Math.min(drawing.start[0], drawing.end[0]) / canvas.width * 1000;
     const y0 = Math.min(drawing.start[1], drawing.end[1]) / canvas.height * 1000;
@@ -1115,22 +1158,37 @@
     const y1 = Math.max(drawing.start[1], drawing.end[1]) / canvas.height * 1000;
     if (x1 - x0 < 4 || y1 - y0 < 4) {
       clearDamageHighlight();
+      if (target) showModal('damage-modal');
       toast('框选太小，请重新拖动一个更大的区域。');
       return;
     }
     const bbox = [x0, y0, x1, y1].map(value => Math.round(value));
     try {
-      const made = await invoke('addManualDefect', state.image.id, JSON.stringify({ bbox, type: 'manual', size: 'manual' }));
-      const item = made.defect;
-      state.damageItems.push(item);
+      const request = target ? { bbox, candidate_id: target.candidate_id } : { bbox, type: 'manual', size: 'manual' };
+      const { defect } = await invoke('addManualDefect', imageId, JSON.stringify(request));
+      if (state.image?.id !== imageId) return;
+      if (target) {
+        if (!state.damageItems.includes(target)) return;
+        target.bbox = defect.bbox;
+        target.proposal_id = defect.proposal_id;
+        target.recommendation = defect.recommendation;
+        target.region_class = defect.region_class;
+        target.repair_allowed = defect.repair_allowed;
+        target.confirmed = defect.confirmed;
+      } else {
+        state.damageItems.push(defect);
+      }
+      const item = target || defect;
       state.selectedDamage = item;
       showDamageHighlight(item);
       renderDamage();
       showModal('damage-modal');
-      toast('已添加手动缺损；点“运行修复”或“运行全部”即可开始。');
+      toast(target ? '已记录人工框选范围，可运行此项修复。' : '已添加手动缺损；点“运行修复”或“运行全部”即可开始。');
     } catch (error) {
+      if (state.image?.id !== imageId) return;
       notifyError(error);
       clearDamageHighlight();
+      if (target) showModal('damage-modal');
     }
   }
 
@@ -1205,25 +1263,21 @@
         case 'auto-restore': {
           if (!state.image) return toast('请先打开一幅壁画。');
           if (state.running || state.autoBusy) return toast('已有任务或 AI 分析在执行，请稍候。');
+          const imageId = state.image.id;
+          const provider = $('#vision-provider').value;
           state.autoBusy = true;
-          state.job = null; state.candidate = null;
-          $('#candidate-strip').innerHTML = '<div class="empty-inline">AI 分析完成后显示修复候选</div>';
-          $('#comparison-stage').innerHTML = '<div class="empty-inline">AI 分析进行中</div>';
-          $('#candidate-count').textContent = '0';
-          $('[data-action="save-result"]').disabled = true;
-          $('[data-action="select-candidate"]').disabled = true;
-          $('[data-action="export-archive"]').disabled = true;
           $('[data-action="run-repair"]').disabled = true;
           $('[data-action="auto-restore"]').disabled = true;
+          $('#vision-provider').disabled = true;
           renderDamage();
-          setAutoStatus('AI 正在识别原图损伤、整理文化线索并生成待确认选区…');
+          setAutoStatus(provider === 'deepseek' ? 'DeepSeek 正在分析图像…' : '本地 Qwen3-VL 正在分析图像…');
           try {
-            const payload = JSON.stringify({ image_id: state.image.id, workflow: 'professional_step' });
+            const payload = JSON.stringify({ image_id: imageId, workflow: 'professional_step', provider });
             await invoke('autoRestore', payload);
-            toast('AI 正在分析，完成后会显示逐项缺损清单。');
           } catch (error) {
+            if (state.image?.id !== imageId) break;
             state.autoBusy = false;
-            setAutoStatus('AI 缺损分析失败：' + (error.message || error));
+            setAutoStatus(`AI 缺损分析失败：${error.message || error} 可切换来源或手动圈选。`);
             notifyError(error);
             await refresh();
           }
@@ -1277,7 +1331,8 @@
           break;
         }
         case 'open-settings': openSettings(); break;
-        case 'close-settings': hideModal('settings-modal'); break;
+        case 'close-settings': closeSettings(); break;
+        case 'save-deepseek-key': await saveDeepSeekKey(); break;
         case 'save-settings': await saveSettings(); break;
         case 'open-reference': showModal('reference-modal'); $('#ref-error').textContent = ''; break;
         case 'close-reference': hideModal('reference-modal'); break;
@@ -1307,6 +1362,9 @@
   }
 
   function openSettings() {
+    $('#deepseek-api-key').value = '';
+    $('#deepseek-key-error').textContent = '';
+    renderDeepSeekKeyStatus(state.lastSnapshot?.models?.deepseek_vision);
     $('#api-kind').value = state.lastSnapshot?.api?.kind || 'responses';
     $('#api-base').value = state.lastSnapshot?.api?.base_url || 'https://api.openai.com/v1';
     $('#api-model').value = state.lastSnapshot?.api?.model || '';
@@ -1319,10 +1377,45 @@
     showModal('settings-modal');
   }
 
+  function closeSettings() {
+    $('#deepseek-api-key').value = '';
+    $('#deepseek-key-error').textContent = '';
+    hideModal('settings-modal');
+  }
+
+  function renderDeepSeekKeyStatus(configured) {
+    $('#deepseek-key-status').textContent = configured ? '已配置' : '未配置';
+  }
+
+  async function saveDeepSeekKey() {
+    const input = $('#deepseek-api-key');
+    const button = $('[data-action="save-deepseek-key"]');
+    const message = $('#deepseek-key-error');
+    if (button.disabled) return;
+    const key = input.value.trim();
+    if (!key) {
+      message.textContent = '请输入 DeepSeek API 密钥。';
+      return;
+    }
+    input.disabled = button.disabled = true;
+    message.textContent = '';
+    try {
+      const result = await invoke('saveDeepSeekKey', key);
+      input.value = '';
+      renderDeepSeekKeyStatus(result.configured);
+      toast('DeepSeek 密钥已保存。');
+      await refresh();
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      input.disabled = button.disabled = false;
+    }
+  }
+
   async function saveSettings() {
     const form = { kind: $('#api-kind').value, base_url: $('#api-base').value.trim(), model: $('#api-model').value.trim(), key: $('#api-key').value, json_mode: $('#api-json').checked,
       imagine: { provider: 'openai_json', base_url: $('#imagine-base').value.trim(), model: $('#imagine-model').value.trim(), key: $('#imagine-key').value } };
-    try { await invoke('saveApiSettings', JSON.stringify(form)); hideModal('settings-modal'); toast('API 配置已保存。'); await refresh(); }
+    try { await invoke('saveApiSettings', JSON.stringify(form)); closeSettings(); toast('API 配置已保存。'); await refresh(); }
     catch (error) { $('#api-error').textContent = error.message; }
   }
 
@@ -1354,6 +1447,7 @@
     if (event.target.value === 'conservative' && $('#evidence-level')) $('#evidence-level').value = 'conservative';
   });
   $('#professional-step')?.addEventListener('change', syncProfessionalUi);
+  $('#vision-provider').addEventListener('change', () => { renderVisionProviderNote(); setAutoStatus(); });
   $('#repair-mode')?.addEventListener('change', syncProfessionalUi);
   $('#evidence-level')?.addEventListener('change', syncProfessionalUi);
   $('#force-override')?.addEventListener('change', syncProfessionalUi);
@@ -1427,6 +1521,10 @@
     if (event.ctrlKey) { event.preventDefault(); state.zoom = Math.max(.5, Math.min(3, state.zoom * (event.deltaY < 0 ? 1.1 : .9))); updateCanvasSize(); }
   }, { passive: false });
   document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !$('#settings-modal').classList.contains('hidden')) {
+      closeSettings();
+      return;
+    }
     if (event.target.matches('input,textarea,select')) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'o') { event.preventDefault(); openImage(); return; }
     if (event.key.toLowerCase() === 'b') setTool('brush');
@@ -1434,13 +1532,13 @@
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); handleAction('undo'); }
     if (event.key === 'Escape') {
       if (state.damageDrawMode) {
-        state.damageDrawMode = false; state.damageDraw = null;
+        state.damageDrawMode = false; state.damageDraw = null; state.damageDrawTarget = null;
         $('#canvas-wrap').classList.remove('damage-drawing');
         clearDamageHighlight();
         toast('已取消手动框选。');
         return;
       }
-      ['settings-modal', 'reference-modal', 'verify-modal', 'damage-modal'].forEach(hideModal);
+      ['reference-modal', 'verify-modal', 'damage-modal'].forEach(hideModal);
     }
   });
 

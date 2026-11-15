@@ -11,3 +11,33 @@ build/
 dist/
 *.exe
 
+
+# Local secrets and environment variants
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Model weights and training outputs
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+*.gguf
+checkpoints/
+runs/
+training-output/
+wandb/
+
+# Downloads and temporary diagnostics
+/datasets/*
+!/datasets/example.jsonl
+downloads/
+logs/
+*.log.*
+*.tmp
